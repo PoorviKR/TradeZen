@@ -1,0 +1,40 @@
+/** @type {import('tailwindcss').Config} */
+export default {
+  content: [
+    "./index.html",
+    "./src/**/*.{js,ts,jsx,tsx}",
+  ],
+  darkMode: 'class',
+  theme: {
+    extend: {
+      colors: {
+        bgPrimary: 'var(--bg-primary)',
+        bgSecondary: 'var(--bg-secondary)',
+        bgTertiary: 'var(--bg-tertiary)',
+        textPrimary: 'var(--text-primary)',
+        textSecondary: 'var(--text-secondary)',
+        textTertiary: 'var(--text-tertiary)',
+        borderDefault: 'var(--border-default)',
+        borderStrong: 'var(--border-strong)',
+        accentPrimary: 'var(--accent-primary)',
+        accentHover: 'var(--accent-hover)',
+        accentMuted: 'var(--accent-muted)',
+        gain: 'var(--gain)',
+        gainDark: 'var(--gain-dark)',
+        loss: 'var(--loss)',
+        lossDark: 'var(--loss-dark)',
+        warning: 'var(--warning)',
+        warningBg: 'var(--warning-bg)',
+        info: 'var(--info)',
+        infoBg: 'var(--info-bg)',
+        success: 'var(--success)',
+        successBg: 'var(--success-bg)',
+        gridLine: 'var(--grid-line)',
+        axisText: 'var(--axis-text)',
+        chartLinePrimary: 'var(--chart-line-primary)',
+        chartLineSecondary: 'var(--chart-line-secondary)',
+      },
+    },
+  },
+  plugins: [],
+}

@@ -1,0 +1,53 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Environments & Virtual Environments
+.venv/
+venv/
+ENV/
+env/
+.env.virtualenv
+
+# Environment configuration & secrets
+.env
+.env.local
+.env.*.local
+
+# Node & Frontend dependencies
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Machine Learning & Model Artifacts
+models/saved/
+*.joblib
+*.pkl
+*.bin
+
+# Database & Local Storage
+*.sqlite
+*.sqlite3
+*.db
+pgdata/
+
+# IDE & Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS generated files
+.DS_Store
+Thumbs.db
+Desktop.ini
