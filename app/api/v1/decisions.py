@@ -262,13 +262,14 @@ def get_dashboard(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Calculates dashboard metrics:
+    """Calculates comprehensive dashboard metrics:
 
     - Mistakes by type over time
-    - Repeated mistakes
+    - Repeated mistakes list
     - Improvement (attempt 1 versus changed answers)
-    - Rule-keeping meter
-    - Discipline score
+    - Rule-keeping meter (%)
+    - Discipline score trend
+    - Backing decision count claim and 'not enough data yet' under 10 decisions
     """
     current_season = getattr(current_user, "current_season", 1)
 
@@ -279,6 +280,7 @@ def get_dashboard(
             Attempt.actor_type == "human",
             Attempt.season_no == current_season,
         )
+        .order_by(Attempt.created_at.asc())
         .all()
     )
 
@@ -289,18 +291,119 @@ def get_dashboard(
             "message": "No decisions yet. Play your first practice scenario to start tracking progress!",
             "total_decisions": 0,
             "season": current_season,
+            "has_enough_data": False,
+            "data_notice": "not enough data yet",
         }
 
-    # Attempt 1 blind vs subsequent attempts
-    attempt1_count = sum(1 for a in attempts if a.attempt_no == 1)
-    revisions_count = sum(1 for a in attempts if a.attempt_no > 1)
+    # Attempt 1 blind vs revisions
+    attempt1_list = [a for a in attempts if a.attempt_no == 1]
+    revisions_list = [a for a in attempts if a.attempt_no > 1]
+
+    # Map scenario_id to attempts
+    scenario_attempts: Dict[int, List[Attempt]] = {}
+    for a in attempts:
+        scenario_attempts.setdefault(a.scenario_id, []).append(a)
+
+    # Mistakes breakdown
+    mistake_counts = {
+        "panic_sell": 0,
+        "averaging_down": 0,
+        "fomo_buy": 0,
+        "revenge_trade": 0,
+    }
+    friendly_names = {
+        "panic_sell": "Panic Sell",
+        "averaging_down": "Averaging Down",
+        "fomo_buy": "FOMO Buy",
+        "revenge_trade": "Revenge Trade",
+        "disciplined": "Disciplined",
+    }
+
+    disciplined_count = 0
+    timeline: List[Dict[str, Any]] = []
+    rolling_scores: List[Dict[str, Any]] = []
+
+    recent_window: List[int] = []
+
+    for idx, att in enumerate(attempts, start=1):
+        lbl = att.prediction.label if att.prediction else "disciplined"
+        is_disc = 1 if lbl == "disciplined" else 0
+        if is_disc:
+            disciplined_count += 1
+        elif lbl in mistake_counts:
+            mistake_counts[lbl] += 1
+
+        recent_window.append(is_disc)
+        if len(recent_window) > 5:
+            recent_window.pop(0)
+
+        rolling_score = round((sum(recent_window) / len(recent_window)) * 100, 1)
+
+        timeline.append({
+            "trade_number": idx,
+            "label": lbl,
+            "friendly_label": friendly_names.get(lbl, lbl),
+            "is_mistake": 0 if is_disc else 1,
+            "attempt_no": att.attempt_no,
+        })
+
+        rolling_scores.append({
+            "trade_number": idx,
+            "score": rolling_score,
+            "date": att.created_at.strftime("%H:%M") if att.created_at else f"#{idx}",
+        })
+
+    # Repeated mistakes list (mistakes that occurred >= 2 times)
+    repeated_mistakes = [
+        {
+            "type": m_type,
+            "label": friendly_names.get(m_type, m_type),
+            "count": count,
+            "supporting_decisions": count,
+        }
+        for m_type, count in mistake_counts.items()
+        if count >= 2
+    ]
+    repeated_mistakes.sort(key=lambda x: x["count"], reverse=True)
+
+    # Improvement calculation (attempt 1 mistake -> revised attempt disciplined)
+    improved_scenarios = 0
+    scenarios_revised = 0
+    for sc_id, sc_atts in scenario_attempts.items():
+        if len(sc_atts) > 1:
+            scenarios_revised += 1
+            first_att = sc_atts[0]
+            last_att = sc_atts[-1]
+            first_lbl = first_att.prediction.label if first_att.prediction else "disciplined"
+            last_lbl = last_att.prediction.label if last_att.prediction else "disciplined"
+            if first_lbl != "disciplined" and last_lbl == "disciplined":
+                improved_scenarios += 1
+
+    improvement_pct = round((improved_scenarios / max(1, scenarios_revised)) * 100, 1) if scenarios_revised > 0 else 0.0
+    rule_compliance_pct = round((disciplined_count / max(1, total_decisions)) * 100, 1)
+    discipline_score = rule_compliance_pct
+
+    has_enough_data = total_decisions >= 10
 
     return {
         "status": "active",
-        "total_decisions": total_decisions,
-        "first_attempts": attempt1_count,
-        "revisions": revisions_count,
         "season": current_season,
-        "has_enough_data": total_decisions >= 10,
-        "message": "Keep practicing to refine your discipline score." if total_decisions < 10 else "Good progress!",
+        "total_decisions": total_decisions,
+        "first_attempts": len(attempt1_list),
+        "revisions": len(revisions_list),
+        "has_enough_data": has_enough_data,
+        "data_notice": "sufficient data" if has_enough_data else "not enough data yet",
+        "decisions_backing_claim": total_decisions,
+        "rule_compliance_pct": rule_compliance_pct,
+        "discipline_score": discipline_score,
+        "mistakes_by_type": mistake_counts,
+        "repeated_mistakes": repeated_mistakes,
+        "improvement": {
+            "scenarios_revised": scenarios_revised,
+            "improved_count": improved_scenarios,
+            "improvement_pct": improvement_pct,
+            "supporting_decisions": scenarios_revised,
+        },
+        "discipline_trend": rolling_scores,
+        "timeline": timeline,
     }
