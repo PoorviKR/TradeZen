@@ -224,6 +224,10 @@ class ScenarioBuilder:
         self.db.add(report_record)
         self.db.commit()
 
+        # 5. Populate bot decisions for all active scenarios (idempotent, 5 bots per scenario)
+        from app.services.bots import populate_bot_decisions
+        bot_count = populate_bot_decisions(self.db, current_active)
+
         report = {
             "report_date": target_date.strftime("%Y-%m-%d"),
             "window_start": window_start_str,
@@ -233,6 +237,7 @@ class ScenarioBuilder:
             "spike_count": spike_cnt,
             "calm_count": calm_cnt,
             "thresholds_used": thresholds_recorded,
+            "bot_decisions_added": bot_count,
         }
         logger.info("Pool report generated: %s", report)
         return report

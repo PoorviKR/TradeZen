@@ -1,5 +1,4 @@
-"""Decisions and user progress router."""
-
+import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -18,7 +17,11 @@ from app.schemas.decision import (
     PatternResult,
 )
 from app.services.rule_checker import check_user_rules
+from app.services.features import compute_history_features, extract_feature_vector
+from app.ml.predictor import MLPredictor
+from app.ml.explainer import explain_text
 
+logger = logging.getLogger("tradezen.decisions")
 router = APIRouter(tags=["decisions & progress"])
 
 
@@ -99,48 +102,7 @@ def submit_decision(
         user_trades_today=trades_today,
     )
 
-    # 2. Pattern detection
-    # Classify decision pattern
-    detected_label = "disciplined"
-    reasons = []
-    prob = 0.85
-    explanation = "Your decision aligned with your defined trading rules."
-
-    if not rules_feedback.passed:
-        if "Averaging Down" in " ".join(rules_feedback.violations):
-            detected_label = "averaging_down"
-            reasons = ["Bought while in loss", "Reason: " + decision_in.reason]
-            prob = 0.92
-            explanation = f"This looks like averaging down. You bought while the position was in a loss. Try holding or respecting your stop-loss instead."
-        elif "daily trade limit" in " ".join(rules_feedback.violations):
-            detected_label = "overtrading"
-            reasons = [f"{trades_today} trades today (limit {active_rule.max_trades_per_day})"]
-            prob = 0.88
-            explanation = f"This looks like overtrading. You have made {trades_today} trades today against your limit of {active_rule.max_trades_per_day}. Step away from the screen."
-        elif "Oversized" in " ".join(rules_feedback.violations):
-            detected_label = "oversized_position"
-            reasons = [f"Position ₹{decision_in.size:,.0f} exceeds {active_rule.max_position_pct}%"]
-            prob = 0.89
-            explanation = f"Position size too large. You allocated beyond your {active_rule.max_position_pct}% risk threshold."
-    elif decision_in.reason.lower() in ["fear", "panic"] and decision_in.decision_seconds < 8:
-        detected_label = "panic_sell"
-        reasons = [f"Decided in {decision_in.decision_seconds:.1f}s", "Reason: Fear"]
-        prob = 0.82
-        explanation = f"This looks like a panic sell. You exited within {decision_in.decision_seconds:.1f}s due to fear."
-    elif decision_in.reason.lower() == "fomo" or "social" in decision_in.reason.lower():
-        detected_label = "fomo_buy"
-        reasons = ["Reason: FOMO/Social Tip", f"Action: {decision_in.action}"]
-        prob = 0.79
-        explanation = "This looks like a FOMO entry driven by social sentiment or chasing price movement."
-
-    pattern_feedback = PatternResult(
-        label=detected_label,
-        probability=prob,
-        reasons=reasons,
-        explanation=explanation,
-    )
-
-    # 3. Personal History check (past 10 decisions)
+    # 2. History features (shared function for user, bots, and training)
     past_attempts = (
         db.query(Attempt)
         .filter(
@@ -153,11 +115,68 @@ def submit_decision(
         .all()
     )
 
+    prior_decisions = [
+        {
+            "label": a.prediction.label if a.prediction else "disciplined",
+            "decision_seconds": a.decision_seconds,
+            "size": a.size,
+            "action": a.action,
+            "reason": a.reason,
+        }
+        for a in reversed(past_attempts)
+    ]
+    history_features = compute_history_features(prior_decisions)
+
+    # 3. Decision-time feature vector known at decision time
+    feature_vec = extract_feature_vector(
+        action=decision_in.action,
+        size=decision_in.size,
+        reason=decision_in.reason,
+        decision_seconds=decision_in.decision_seconds,
+        chart_viewed=decision_in.chart_viewed,
+        scenario_drop_pct=scenario.drop_pct,
+        scenario_current_price=scenario.current_price,
+        scenario_trades_today=trades_today,
+        scenario_last_trade_was_loss=scenario.last_trade_was_loss,
+        scenario_event_type=scenario.event_type,
+        stop_loss_pct=active_rule.stop_loss_pct,
+        max_trades_per_day=active_rule.max_trades_per_day,
+        max_position_pct=active_rule.max_position_pct,
+        no_averaging_down=active_rule.no_averaging_down,
+        practice_capital=active_rule.practice_capital,
+        history_features=history_features,
+    )
+
+    # 4. ML Pattern detection & SHAP explanation
+    try:
+        predictor = MLPredictor.get_instance()
+        ml_result = predictor.predict(feature_vec)
+        detected_label = ml_result["label"]
+        prob = ml_result["probability"]
+        reasons_list = [r["feature"].replace("_", " ") for r in ml_result["reasons"]]
+        explanation = explain_text(feature_vec, ml_result["reasons"], predicted_label=detected_label)
+        model_version = ml_result["model_version"]
+    except Exception as exc:
+        logger.warning("ML inference fallback used: %s", exc)
+        detected_label = "disciplined" if rules_feedback.passed else "averaging_down"
+        prob = 0.85
+        reasons_list = ["Rule alignment" if rules_feedback.passed else "Rule departure"]
+        explanation = "Decision evaluated against your defined trading rules."
+        model_version = "v1.0.0"
+
+    pattern_feedback = PatternResult(
+        label=detected_label,
+        probability=prob,
+        reasons=reasons_list,
+        explanation=explanation,
+    )
+
+    # 5. Personal History feedback (past 10 decisions)
     if len(past_attempts) < 3:
         history_feedback = f"Early progress: {len(past_attempts)} decision(s) recorded so far. Continue practicing to unlock personalized behavioral trend analysis."
     else:
-        panic_count = sum(1 for a in past_attempts if a.reason.lower() in ["fear", "panic"])
-        history_feedback = f"In your last {len(past_attempts)} decisions: {panic_count} fear-based reactions noted."
+        mistake_cnt = int(history_features["history_mistake_count"])
+        history_feedback = f"In your last {len(past_attempts)} decisions: {mistake_cnt} pattern deviation(s) noted."
 
     # Save Attempt
     attempt = Attempt(
@@ -177,20 +196,14 @@ def submit_decision(
     db.commit()
     db.refresh(attempt)
 
-    # Save Prediction
+    # Save Prediction with decision-time features
     prediction = Prediction(
         user_id=current_user.id,
         attempt_id=attempt.id,
-        features={
-            "action": decision_in.action,
-            "size": decision_in.size,
-            "reason": decision_in.reason,
-            "decision_seconds": decision_in.decision_seconds,
-            "trades_today": trades_today,
-        },
+        features=feature_vec,
         label=detected_label,
         probability=prob,
-        model_version="v1.0.0",
+        model_version=model_version,
     )
     db.add(prediction)
     db.commit()

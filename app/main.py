@@ -112,7 +112,13 @@ def check_and_catch_up_scenarios():
 
 @app.on_event("startup")
 def on_startup():
-    """Application startup tasks: runs non-blocking pool catch-up if behind."""
+    """Application startup tasks: preloads ML predictor and runs non-blocking pool catch-up if behind."""
+    try:
+        from app.ml.predictor import MLPredictor
+        MLPredictor.get_instance()
+    except Exception as exc:
+        logger.info("ML predictor startup preload note: %s", exc)
+
     if settings.ENVIRONMENT != "test":
         check_and_catch_up_scenarios()
 

@@ -108,6 +108,7 @@ def main():
     print(f"  - Drops:               {report['drop_count']}")
     print(f"  - Spikes:              {report['spike_count']}")
     print(f"  - Calm:                {report['calm_count']}")
+    print(f"  - Bot Decisions:       {report.get('bot_decisions_added', 0)}")
     print(f"  Holiday Skipped:       {report['holiday_skipped']}")
     print(f"  Thresholds Used:       {report['thresholds_used']}")
 

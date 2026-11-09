@@ -1,0 +1,188 @@
+{
+  "model_version": "v1.0.0",
+  "selected_model": "xgboost",
+  "macro_f1": 1.0,
+  "accuracy": 1.0,
+  "logistic_regression_macro_f1": 1.0,
+  "xgboost_macro_f1": 1.0,
+  "confusion_matrix": [
+    [
+      74,
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      31,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      31,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      33,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      0,
+      31
+    ]
+  ],
+  "classification_report": {
+    "disciplined": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1-score": 1.0,
+      "support": 74.0
+    },
+    "panic_sell": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1-score": 1.0,
+      "support": 31.0
+    },
+    "averaging_down": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1-score": 1.0,
+      "support": 31.0
+    },
+    "fomo_buy": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1-score": 1.0,
+      "support": 33.0
+    },
+    "revenge_trade": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1-score": 1.0,
+      "support": 31.0
+    },
+    "accuracy": 1.0,
+    "macro avg": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1-score": 1.0,
+      "support": 200.0
+    },
+    "weighted avg": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1-score": 1.0,
+      "support": 200.0
+    }
+  },
+  "classes": [
+    "disciplined",
+    "panic_sell",
+    "averaging_down",
+    "fomo_buy",
+    "revenge_trade"
+  ],
+  "feature_names": [
+    "decision_seconds",
+    "size",
+    "size_pct_of_capital",
+    "chart_viewed",
+    "action_buy",
+    "action_sell",
+    "action_hold",
+    "reason_fear",
+    "reason_recover",
+    "reason_fomo",
+    "reason_rule",
+    "reason_social",
+    "reason_analysis",
+    "drop_pct",
+    "current_price",
+    "trades_today",
+    "last_trade_was_loss",
+    "event_drop",
+    "event_spike",
+    "event_calm",
+    "stop_loss_pct",
+    "max_trades_per_day",
+    "max_position_pct",
+    "no_averaging_down",
+    "rule_violates_max_trades",
+    "rule_violates_position_size",
+    "rule_violates_averaging_down",
+    "history_total_decisions",
+    "history_mistake_count",
+    "history_mistake_rate",
+    "history_panic_count",
+    "history_panic_rate",
+    "history_averaging_count",
+    "history_averaging_rate",
+    "history_fomo_count",
+    "history_fomo_rate",
+    "history_revenge_count",
+    "history_revenge_rate",
+    "history_disciplined_count",
+    "history_disciplined_rate",
+    "history_avg_decision_seconds",
+    "history_last_was_mistake",
+    "history_consecutive_mistakes"
+  ],
+  "n_train_samples": 800,
+  "n_test_samples": 200,
+  "n_train_scenarios": 160,
+  "n_test_scenarios": 40,
+  "fixed_test_scenario_ids": [
+    2,
+    130,
+    7,
+    8,
+    9,
+    140,
+    144,
+    151,
+    24,
+    152,
+    23,
+    155,
+    27,
+    29,
+    36,
+    164,
+    167,
+    40,
+    169,
+    41,
+    174,
+    51,
+    182,
+    56,
+    57,
+    186,
+    58,
+    60,
+    189,
+    190,
+    63,
+    192,
+    198,
+    71,
+    72,
+    87,
+    88,
+    108,
+    109,
+    115
+  ]
+}
