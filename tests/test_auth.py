@@ -69,3 +69,43 @@ def test_unauthenticated_request_rejected(client):
     """Test that protected endpoint fails without token."""
     response = client.get("/api/v1/auth/me")
     assert response.status_code == status.HTTP_401_UNAUTHORIZED
+
+
+def test_expired_token_rejected(client, test_user):
+    """Test that an expired JWT access token is rejected with 401."""
+    from datetime import timedelta
+    from app.core.security import create_access_token
+
+    expired_token = create_access_token(
+        subject=str(test_user.id),
+        expires_delta=timedelta(seconds=-10),
+    )
+    response = client.get(
+        "/api/v1/auth/me",
+        headers={"Authorization": f"Bearer {expired_token}"},
+    )
+    assert response.status_code == status.HTTP_401_UNAUTHORIZED
+    assert "Token expired" in response.json()["detail"]
+
+
+def test_token_refresh(client, test_user):
+    """Test that a valid refresh token generates a new access token."""
+    from app.core.security import create_refresh_token
+
+    refresh_token = create_refresh_token(subject=str(test_user.id))
+    response = client.post(
+        "/api/v1/auth/refresh",
+        headers={"Authorization": f"Bearer {refresh_token}"},
+    )
+    assert response.status_code == status.HTTP_200_OK
+    data = response.json()
+    assert "access_token" in data
+    assert data["user"]["email"] == test_user.email
+    assert "tradezen_access_token" in response.cookies
+
+
+def test_logout_clears_cookies(client):
+    """Test that logout deletes authentication cookies."""
+    response = client.post("/api/v1/auth/logout")
+    assert response.status_code == status.HTTP_200_OK
+    assert response.json()["message"] == "Successfully logged out."

@@ -33,6 +33,7 @@ class UserResponse(BaseModel):
     email: EmailStr
     display_name: str
     is_active: bool
+    current_season: int = 1
     created_at: datetime
 
     class Config:

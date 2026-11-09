@@ -64,18 +64,20 @@ def submit_decision(
         db.refresh(active_rule)
 
     # Determine attempt number and season
+    season_no = getattr(current_user, "current_season", 1)
+
     last_attempt = (
         db.query(Attempt)
         .filter(
             Attempt.user_id == current_user.id,
             Attempt.scenario_id == decision_in.scenario_id,
+            Attempt.season_no == season_no,
         )
         .order_by(Attempt.attempt_no.desc())
         .first()
     )
 
     attempt_no = 1 if not last_attempt else last_attempt.attempt_no + 1
-    season_no = last_attempt.season_no if last_attempt else 1
 
     # Count trades today in current season
     trades_today = (
@@ -232,18 +234,13 @@ def restart_progress(
     db: Session = Depends(get_db),
 ):
     """Archives the user's attempts under a new season number and starts fresh."""
-    latest_attempt = (
-        db.query(Attempt)
-        .filter(Attempt.user_id == current_user.id)
-        .order_by(Attempt.season_no.desc())
-        .first()
-    )
-    new_season = (latest_attempt.season_no + 1) if latest_attempt else 2
+    current_user.current_season = getattr(current_user, "current_season", 1) + 1
+    db.commit()
+    db.refresh(current_user)
 
-    # A new attempt will automatically use new_season
     return {
-        "message": f"Progress archived successfully. You are now on Season {new_season}.",
-        "new_season": new_season,
+        "message": f"Progress archived successfully. You are now on Season {current_user.current_season}.",
+        "new_season": current_user.current_season,
     }
 
 
@@ -260,13 +257,7 @@ def get_dashboard(
     - Rule-keeping meter
     - Discipline score
     """
-    latest_attempt = (
-        db.query(Attempt)
-        .filter(Attempt.user_id == current_user.id)
-        .order_by(Attempt.season_no.desc())
-        .first()
-    )
-    current_season = latest_attempt.season_no if latest_attempt else 1
+    current_season = getattr(current_user, "current_season", 1)
 
     attempts = (
         db.query(Attempt)

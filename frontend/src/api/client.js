@@ -6,7 +6,7 @@
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || '/api/v1';
 
-async function request(endpoint, options = {}) {
+async function request(endpoint, options = {}, isRetry = false) {
   const url = `${API_BASE}${endpoint}`;
   const config = {
     ...options,
@@ -18,6 +18,27 @@ async function request(endpoint, options = {}) {
   };
 
   const response = await fetch(url, config);
+
+  // Automatic token refresh on 401 if not already retrying or on auth routes
+  if (
+    response.status === 401 &&
+    !isRetry &&
+    endpoint !== '/auth/login' &&
+    endpoint !== '/auth/signup' &&
+    endpoint !== '/auth/refresh'
+  ) {
+    try {
+      const refreshRes = await fetch(`${API_BASE}/auth/refresh`, {
+        method: 'POST',
+        credentials: 'include',
+      });
+      if (refreshRes.ok) {
+        return await request(endpoint, options, true);
+      }
+    } catch {
+      // Refresh failed, fall through to error handling
+    }
+  }
 
   if (!response.ok) {
     let errorDetail = 'Request failed';
@@ -38,6 +59,7 @@ export const api = {
   signup: (data) => request('/auth/signup', { method: 'POST', body: JSON.stringify(data) }),
   login: (data) => request('/auth/login', { method: 'POST', body: JSON.stringify(data) }),
   logout: () => request('/auth/logout', { method: 'POST' }),
+  refresh: () => request('/auth/refresh', { method: 'POST' }),
   getMe: () => request('/auth/me'),
 
   // Rules

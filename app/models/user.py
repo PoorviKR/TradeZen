@@ -17,6 +17,7 @@ class User(Base):
     password_hash = Column(String(255), nullable=False)
     display_name = Column(String(100), nullable=False)
     is_active = Column(Boolean, default=True, nullable=False)
+    current_season = Column(Integer, default=1, nullable=False)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
 
     # Relationships

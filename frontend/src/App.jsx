@@ -17,6 +17,10 @@ export default function App() {
   const [noAveraging, setNoAveraging] = useState(true);
   const [maxPosition, setMaxPosition] = useState(20.0);
   const [practiceCapital, setPracticeCapital] = useState(100000.0);
+  const [ruleHistory, setRuleHistory] = useState([]);
+  const [hasRules, setHasRules] = useState(false);
+  const [rulesSuccessMessage, setRulesSuccessMessage] = useState('');
+  const [rulesErrorMessage, setRulesErrorMessage] = useState('');
 
   // Trainer state
   const [scenarios, setScenarios] = useState([]);
@@ -47,12 +51,17 @@ export default function App() {
     try {
       const rule = await api.getCurrentRules();
       if (rule) {
+        setHasRules(true);
         setStopLoss(rule.stop_loss_pct);
         setMaxTrades(rule.max_trades_per_day);
         setNoAveraging(rule.no_averaging_down);
         setMaxPosition(rule.max_position_pct);
         setPracticeCapital(rule.practice_capital);
+      } else {
+        setHasRules(false);
       }
+      const history = await api.getRuleHistory();
+      setRuleHistory(history || []);
     } catch (err) {
       console.error('Failed to load rules', err);
     }
@@ -94,29 +103,41 @@ export default function App() {
       loadRules();
       loadScenarios();
     } catch (err) {
-      setErrorMessage(err.message);
+      setErrorMessage(err.message || 'Authentication failed. Please check your credentials.');
     }
   };
 
   const handleLogout = async () => {
-    await api.logout();
+    try {
+      await api.logout();
+    } catch (e) {
+      console.error(e);
+    }
     setCurrentUser(null);
+    setScenarios([]);
+    setRuleHistory([]);
+    setHasRules(false);
+    setDashboardData(null);
     setActiveTab('auth');
   };
 
   const handleSaveRules = async (e) => {
     e.preventDefault();
+    setRulesSuccessMessage('');
+    setRulesErrorMessage('');
     try {
-      await api.setRules({
+      const saved = await api.setRules({
         stop_loss_pct: parseFloat(stopLoss),
         max_trades_per_day: parseInt(maxTrades, 10),
         no_averaging_down: Boolean(noAveraging),
         max_position_pct: parseFloat(maxPosition),
         practice_capital: parseFloat(practiceCapital),
       });
-      alert('Rules saved successfully!');
+      setHasRules(true);
+      setRulesSuccessMessage(`Rule Version ${saved.version} saved! Future decisions will be judged against these parameters.`);
+      await loadRules();
     } catch (err) {
-      alert(`Error saving rules: ${err.message}`);
+      setRulesErrorMessage(err.message || 'Error saving rules');
     }
   };
 
@@ -186,42 +207,51 @@ export default function App() {
         </div>
 
         {currentUser ? (
-          <nav className="flex items-center space-x-2 sm:space-x-4">
-            <button
-              onClick={() => setActiveTab('trainer')}
-              className={`px-3 py-1.5 text-sm rounded transition-colors ${
-                activeTab === 'trainer' ? 'bg-accentPrimary text-white font-medium' : 'text-textSecondary hover:text-textPrimary'
-              }`}
-            >
-              Practice
-            </button>
-            <button
-              onClick={() => setActiveTab('rules')}
-              className={`px-3 py-1.5 text-sm rounded transition-colors ${
-                activeTab === 'rules' ? 'bg-accentPrimary text-white font-medium' : 'text-textSecondary hover:text-textPrimary'
-              }`}
-            >
-              My Rules
-            </button>
-            <button
-              onClick={loadDashboard}
-              className={`px-3 py-1.5 text-sm rounded transition-colors ${
-                activeTab === 'dashboard' ? 'bg-accentPrimary text-white font-medium' : 'text-textSecondary hover:text-textPrimary'
-              }`}
-            >
-              Dashboard
-            </button>
-            <button
-              onClick={handleLogout}
-              className="p-1.5 text-textSecondary hover:text-loss transition-colors"
-              title="Logout"
-            >
-              <LogOut className="w-5 h-5" />
-            </button>
-          </nav>
+          <div className="flex items-center space-x-2 sm:space-x-3">
+            <div className="hidden sm:flex items-center space-x-1.5 text-xs text-textSecondary bg-bgTertiary px-2.5 py-1 rounded border border-borderDefault">
+              <UserIcon className="w-3.5 h-3.5 text-accentPrimary" />
+              <span className="font-medium text-textPrimary truncate max-w-[140px]">{currentUser.display_name}</span>
+              <span className="text-textTertiary">|</span>
+              <span className="text-accentHover font-semibold">Season {currentUser.current_season || 1}</span>
+            </div>
+
+            <nav className="flex items-center space-x-1 sm:space-x-2">
+              <button
+                onClick={() => setActiveTab('trainer')}
+                className={`px-2.5 sm:px-3 py-1.5 text-xs sm:text-sm rounded transition-colors ${
+                  activeTab === 'trainer' ? 'bg-accentPrimary text-white font-medium' : 'text-textSecondary hover:text-textPrimary'
+                }`}
+              >
+                Practice
+              </button>
+              <button
+                onClick={() => setActiveTab('rules')}
+                className={`px-2.5 sm:px-3 py-1.5 text-xs sm:text-sm rounded transition-colors ${
+                  activeTab === 'rules' ? 'bg-accentPrimary text-white font-medium' : 'text-textSecondary hover:text-textPrimary'
+                }`}
+              >
+                My Rules
+              </button>
+              <button
+                onClick={loadDashboard}
+                className={`px-2.5 sm:px-3 py-1.5 text-xs sm:text-sm rounded transition-colors ${
+                  activeTab === 'dashboard' ? 'bg-accentPrimary text-white font-medium' : 'text-textSecondary hover:text-textPrimary'
+                }`}
+              >
+                Dashboard
+              </button>
+              <button
+                onClick={handleLogout}
+                className="p-1.5 text-textSecondary hover:text-loss transition-colors"
+                title="Logout"
+              >
+                <LogOut className="w-4 sm:w-5 h-4 sm:h-5" />
+              </button>
+            </nav>
+          </div>
         ) : (
-          <div className="text-sm text-textSecondary">
-            <span>Welcome Guest</span>
+          <div className="text-xs text-textSecondary bg-bgTertiary px-2.5 py-1 rounded border border-borderDefault">
+            <span>Sign In Required</span>
           </div>
         )}
       </header>
@@ -229,14 +259,50 @@ export default function App() {
       {/* Main Content Area */}
       <main className="flex-1 max-w-4xl w-full mx-auto p-4 sm:p-6">
         {!currentUser ? (
-          <div className="max-w-md mx-auto mt-8 bg-bgSecondary border border-borderDefault p-6 rounded-lg shadow-lg">
-            <h2 className="text-xl font-bold mb-4 text-center">
-              {authMode === 'login' ? 'Sign in to TradeZen' : 'Create TradeZen Account'}
-            </h2>
+          <div className="max-w-md mx-auto mt-6 bg-bgSecondary border border-borderDefault p-6 rounded-lg shadow-lg">
+            {/* Auth Mode Toggle */}
+            <div className="flex border-b border-borderDefault mb-5">
+              <button
+                type="button"
+                onClick={() => {
+                  setAuthMode('login');
+                  setErrorMessage('');
+                }}
+                className={`flex-1 pb-2.5 text-sm font-semibold transition-colors text-center ${
+                  authMode === 'login'
+                    ? 'text-accentPrimary border-b-2 border-accentPrimary'
+                    : 'text-textSecondary hover:text-textPrimary'
+                }`}
+              >
+                Sign In
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setAuthMode('signup');
+                  setErrorMessage('');
+                }}
+                className={`flex-1 pb-2.5 text-sm font-semibold transition-colors text-center ${
+                  authMode === 'signup'
+                    ? 'text-accentPrimary border-b-2 border-accentPrimary'
+                    : 'text-textSecondary hover:text-textPrimary'
+                }`}
+              >
+                Create Account
+              </button>
+            </div>
 
             {errorMessage && (
-              <div className="mb-4 p-3 rounded bg-warningBg border border-warning text-warning text-sm">
-                {errorMessage}
+              <div className="mb-4 p-3 rounded bg-warningBg border border-warning text-warning text-xs sm:text-sm flex items-start justify-between">
+                <span>{errorMessage}</span>
+                <button
+                  type="button"
+                  onClick={() => setErrorMessage('')}
+                  className="text-warning hover:text-white font-bold ml-2 text-xs"
+                  aria-label="Clear error"
+                >
+                  ✕
+                </button>
               </div>
             )}
 
@@ -317,7 +383,7 @@ export default function App() {
             </div>
           </div>
         ) : activeTab === 'rules' ? (
-          <div className="bg-bgSecondary border border-borderDefault rounded-lg p-6 max-w-xl mx-auto shadow-sm">
+          <div className="bg-bgSecondary border border-borderDefault rounded-lg p-4 sm:p-6 max-w-2xl mx-auto shadow-sm">
             <h2 className="text-xl font-bold mb-2 flex items-center space-x-2">
               <Shield className="w-5 h-5 text-accentPrimary" />
               <span>Personal Trading Rules</span>
@@ -326,12 +392,51 @@ export default function App() {
               Set your disciplined boundaries. Decisions in simulations will be judged directly against these rules.
             </p>
 
+            {!hasRules && (
+              <div className="mb-6 p-4 rounded-lg bg-bgTertiary border border-borderDefault flex items-start space-x-3">
+                <AlertTriangle className="w-5 h-5 text-warning shrink-0 mt-0.5" />
+                <div>
+                  <h4 className="text-sm font-semibold text-textPrimary">No Rules Configured Yet</h4>
+                  <p className="text-xs text-textSecondary mt-0.5">
+                    Your account currently has no custom rules. Save your parameters below to establish your initial risk baseline.
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {rulesSuccessMessage && (
+              <div className="mb-4 p-3 rounded bg-successBg border border-success text-success text-xs sm:text-sm flex items-start justify-between">
+                <span>✓ {rulesSuccessMessage}</span>
+                <button
+                  type="button"
+                  onClick={() => setRulesSuccessMessage('')}
+                  className="text-success hover:text-white font-bold ml-2 text-xs"
+                >
+                  ✕
+                </button>
+              </div>
+            )}
+
+            {rulesErrorMessage && (
+              <div className="mb-4 p-3 rounded bg-warningBg border border-warning text-warning text-xs sm:text-sm flex items-start justify-between">
+                <span>{rulesErrorMessage}</span>
+                <button
+                  type="button"
+                  onClick={() => setRulesErrorMessage('')}
+                  className="text-warning hover:text-white font-bold ml-2 text-xs"
+                >
+                  ✕
+                </button>
+              </div>
+            )}
+
             <form onSubmit={handleSaveRules} className="space-y-4">
               <div>
                 <label className="block text-sm font-medium mb-1">Stop-Loss Limit (%)</label>
                 <input
                   type="number"
                   step="0.1"
+                  required
                   value={stopLoss}
                   onChange={(e) => setStopLoss(e.target.value)}
                   className="w-full bg-bgTertiary border border-borderDefault rounded p-2 text-textPrimary focus:border-accentPrimary focus:outline-none"
@@ -342,6 +447,8 @@ export default function App() {
                 <label className="block text-sm font-medium mb-1">Max Trades Per Day</label>
                 <input
                   type="number"
+                  required
+                  min={1}
                   value={maxTrades}
                   onChange={(e) => setMaxTrades(e.target.value)}
                   className="w-full bg-bgTertiary border border-borderDefault rounded p-2 text-textPrimary focus:border-accentPrimary focus:outline-none"
@@ -365,6 +472,10 @@ export default function App() {
                 <label className="block text-sm font-medium mb-1">Max Single Position Size (% of Capital)</label>
                 <input
                   type="number"
+                  step="0.5"
+                  required
+                  min={1}
+                  max={100}
                   value={maxPosition}
                   onChange={(e) => setMaxPosition(e.target.value)}
                   className="w-full bg-bgTertiary border border-borderDefault rounded p-2 text-textPrimary focus:border-accentPrimary focus:outline-none"
@@ -372,9 +483,12 @@ export default function App() {
               </div>
 
               <div>
-                <label className="block text-sm font-medium mb-1">Practice Capital (₹)</label>
+                <label className="block text-sm font-medium mb-1">Practice Capital (₹) - Custom Sizing</label>
                 <input
                   type="number"
+                  step="1000"
+                  required
+                  min={1000}
                   value={practiceCapital}
                   onChange={(e) => setPracticeCapital(e.target.value)}
                   className="w-full bg-bgTertiary border border-borderDefault rounded p-2 text-textPrimary focus:border-accentPrimary focus:outline-none"
@@ -388,6 +502,55 @@ export default function App() {
                 Save & Update Rules
               </button>
             </form>
+
+            {/* Version History */}
+            {ruleHistory.length > 0 && (
+              <div className="mt-8 pt-6 border-t border-borderDefault">
+                <div className="flex items-center justify-between mb-2">
+                  <h3 className="text-sm font-semibold uppercase tracking-wider text-textSecondary">
+                    Rule Version History ({ruleHistory.length})
+                  </h3>
+                  <span className="text-xs text-textTertiary">Historical audits preserved</span>
+                </div>
+                <p className="text-xs text-textTertiary mb-3">
+                  Decisions made under previous rule versions remain judged by the rules that applied then.
+                </p>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs text-left border border-borderDefault rounded">
+                    <thead className="bg-bgTertiary text-textSecondary uppercase">
+                      <tr>
+                        <th className="px-3 py-2">Version</th>
+                        <th className="px-3 py-2">Stop Loss</th>
+                        <th className="px-3 py-2">Max Trades</th>
+                        <th className="px-3 py-2">No Averaging</th>
+                        <th className="px-3 py-2">Max Position</th>
+                        <th className="px-3 py-2">Practice Capital</th>
+                        <th className="px-3 py-2">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-borderDefault">
+                      {ruleHistory.map((r) => (
+                        <tr key={r.id} className="hover:bg-bgTertiary/50">
+                          <td className="px-3 py-2 font-mono font-bold">v{r.version}</td>
+                          <td className="px-3 py-2">{r.stop_loss_pct}%</td>
+                          <td className="px-3 py-2">{r.max_trades_per_day}/day</td>
+                          <td className="px-3 py-2">{r.no_averaging_down ? 'Yes' : 'No'}</td>
+                          <td className="px-3 py-2">{r.max_position_pct}%</td>
+                          <td className="px-3 py-2">₹{r.practice_capital?.toLocaleString('en-IN')}</td>
+                          <td className="px-3 py-2">
+                            {r.is_current ? (
+                              <span className="px-1.5 py-0.5 rounded bg-successBg text-success font-semibold">Active</span>
+                            ) : (
+                              <span className="text-textTertiary">Archived</span>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
           </div>
         ) : activeTab === 'dashboard' ? (
           <div className="space-y-6">
