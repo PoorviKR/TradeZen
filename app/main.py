@@ -1,14 +1,21 @@
 """Main FastAPI application entry point for TradeZen Scenario Coach."""
 
 import logging
+import threading
+from datetime import date
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import func
 from sqlalchemy.exc import OperationalError, ProgrammingError, SQLAlchemyError
 
 from app.core.config import settings
 from app.api.v1 import api_router
+from app.db.session import SessionLocal
+from app.models.scenario import Scenario
+from app.services.upstox_client import UpstoxClient
+from app.jobs.refresh_scenarios import refresh_scenarios
 
 logger = logging.getLogger("tradezen")
 
@@ -68,6 +75,46 @@ app.add_middleware(
 
 # Mount API routers under configured API base URL (e.g. /api/v1)
 app.include_router(api_router, prefix=settings.API_BASE_URL)
+
+
+def check_and_catch_up_scenarios():
+    """Checks if the scenario pool is behind and triggers background catch-up if needed."""
+    def _worker():
+        try:
+            with SessionLocal() as db:
+                client = UpstoxClient()
+                today = date.today()
+                recent_days = client.get_trading_days(today, 1)
+                last_trading_day = recent_days[-1]
+
+                # Check active scenario count
+                active_count = (
+                    db.query(func.count(Scenario.id))
+                    .filter(Scenario.active.is_(True))
+                    .scalar()
+                    or 0
+                )
+                if active_count < 200:
+                    logger.info(
+                        "Scenario pool is behind (active scenarios: %d < 200). Running background catch-up...",
+                        active_count,
+                    )
+                    refresh_scenarios(target_date=last_trading_day, db_session=db, client=client)
+                    logger.info("Background scenario pool catch-up completed.")
+                else:
+                    logger.info("Scenario pool is up to date with %d active scenarios.", active_count)
+        except Exception as exc:
+            logger.info("Background scenario catch-up check skipped: %s", exc)
+
+    thread = threading.Thread(target=_worker, daemon=True, name="scenario-catchup-worker")
+    thread.start()
+
+
+@app.on_event("startup")
+def on_startup():
+    """Application startup tasks: runs non-blocking pool catch-up if behind."""
+    if settings.ENVIRONMENT != "test":
+        check_and_catch_up_scenarios()
 
 
 @app.get("/")

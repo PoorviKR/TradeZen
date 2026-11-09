@@ -65,8 +65,10 @@ def upgrade() -> None:
         sa.Column('outcome_5m', sa.Float(), nullable=True),
         sa.Column('outcome_10m', sa.Float(), nullable=True),
         sa.Column('outcome_30m', sa.Float(), nullable=True),
+        sa.Column('outcome_candles', sa.JSON(), nullable=True),
         sa.Column('trades_today', sa.Integer(), nullable=False, server_default='1'),
         sa.Column('last_trade_was_loss', sa.Boolean(), nullable=False, server_default=sa.text('false')),
+        sa.Column('thresholds', sa.JSON(), nullable=True),
         sa.Column('active', sa.Boolean(), nullable=False, server_default=sa.text('true')),
         sa.Column('window_end', sa.DateTime(timezone=True), nullable=True),
         sa.Column('created_on', sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
@@ -143,8 +145,48 @@ def upgrade() -> None:
     op.create_index(op.f('ix_predictions_user_id'), 'predictions', ['user_id'], unique=False)
     op.create_index(op.f('ix_predictions_attempt_id'), 'predictions', ['attempt_id'], unique=False)
 
+    # 7. raw_candles table
+    op.create_table(
+        'raw_candles',
+        sa.Column('id', sa.Integer(), nullable=False),
+        sa.Column('symbol', sa.String(length=50), nullable=False),
+        sa.Column('trading_date', sa.String(length=10), nullable=False),
+        sa.Column('timestamp', sa.Integer(), nullable=False),
+        sa.Column('open', sa.Float(), nullable=False),
+        sa.Column('high', sa.Float(), nullable=False),
+        sa.Column('low', sa.Float(), nullable=False),
+        sa.Column('close', sa.Float(), nullable=False),
+        sa.Column('volume', sa.Float(), nullable=False, server_default='0.0'),
+        sa.Column('created_at', sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.PrimaryKeyConstraint('id')
+    )
+    op.create_index(op.f('ix_raw_candles_id'), 'raw_candles', ['id'], unique=False)
+    op.create_index(op.f('ix_raw_candles_symbol'), 'raw_candles', ['symbol'], unique=False)
+    op.create_index(op.f('ix_raw_candles_trading_date'), 'raw_candles', ['trading_date'], unique=False)
+    op.create_index(op.f('ix_raw_candles_timestamp'), 'raw_candles', ['timestamp'], unique=False)
+
+    # 8. pool_reports table
+    op.create_table(
+        'pool_reports',
+        sa.Column('id', sa.Integer(), nullable=False),
+        sa.Column('report_date', sa.String(length=10), nullable=False),
+        sa.Column('window_start', sa.String(length=10), nullable=False),
+        sa.Column('window_end', sa.String(length=10), nullable=False),
+        sa.Column('total_scenarios', sa.Integer(), nullable=False, server_default='0'),
+        sa.Column('drop_count', sa.Integer(), nullable=False, server_default='0'),
+        sa.Column('spike_count', sa.Integer(), nullable=False, server_default='0'),
+        sa.Column('calm_count', sa.Integer(), nullable=False, server_default='0'),
+        sa.Column('thresholds_used', sa.JSON(), nullable=False),
+        sa.Column('created_at', sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.PrimaryKeyConstraint('id')
+    )
+    op.create_index(op.f('ix_pool_reports_id'), 'pool_reports', ['id'], unique=False)
+    op.create_index(op.f('ix_pool_reports_report_date'), 'pool_reports', ['report_date'], unique=False)
+
 
 def downgrade() -> None:
+    op.drop_table('pool_reports')
+    op.drop_table('raw_candles')
     op.drop_table('predictions')
     op.drop_table('bot_decisions')
     op.drop_table('attempts')

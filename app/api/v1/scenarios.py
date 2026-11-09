@@ -24,17 +24,23 @@ def get_next_scenarios(
 
     Anonymizes the symbol and date to prevent hindsight bias.
     """
-    seen_scenario_ids = (
-        db.query(Attempt.scenario_id)
+    # Extract scenario IDs already attempted by current user
+    seen_ids = [
+        r[0]
+        for r in db.query(Attempt.scenario_id)
         .filter(Attempt.user_id == current_user.id)
-        .scalar_subquery()
-    )
+        .distinct()
+        .all()
+    ]
 
+    query = db.query(Scenario).filter(Scenario.active.is_(True))
+    if seen_ids:
+        query = query.filter(~Scenario.id.in_(seen_ids))
+
+    effective_limit = max(10, min(limit, 20))
     unseen_scenarios = (
-        db.query(Scenario)
-        .filter(Scenario.active.is_(True), Scenario.id.not_in(seen_scenario_ids))
-        .order_by(func.random())
-        .limit(max(10, min(limit, 20)))
+        query.order_by(func.random())
+        .limit(effective_limit)
         .all()
     )
 

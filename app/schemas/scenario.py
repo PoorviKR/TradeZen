@@ -38,6 +38,7 @@ class ScenarioRevealResponse(BaseModel):
     outcome_5m: Optional[float]
     outcome_10m: Optional[float]
     outcome_30m: Optional[float]
+    outcome_candles: Optional[List[Any]] = None
 
     class Config:
         from_attributes = True
