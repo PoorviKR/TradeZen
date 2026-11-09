@@ -46,6 +46,9 @@ Open `.env` and verify your PostgreSQL credentials in `DATABASE_URL` (default: `
 ### 3. Backend Setup
 Create and activate a virtual environment, then install Python dependencies:
 ```powershell
+# (Optional) If script execution is restricted in your PowerShell:
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+
 # Create a local virtual environment (.venv is ignored by git)
 python -m venv .venv
 

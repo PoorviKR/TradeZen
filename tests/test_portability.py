@@ -15,7 +15,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SOURCE_DIRS = [
     PROJECT_ROOT / "app",
     PROJECT_ROOT / "scripts",
-    PROJECT_ROOT / "frontend" / "src",
+    PROJECT_ROOT / "frontend",
     PROJECT_ROOT / "migrations",
 ]
 
@@ -56,8 +56,8 @@ def test_no_absolute_paths_or_hardcoded_localhost():
                 continue
             if file_path.name in IGNORED_FILES:
                 continue
-            # Skip python cache
-            if "__pycache__" in file_path.parts:
+            # Skip python cache, dependencies, and build outputs
+            if any(part in file_path.parts for part in ["__pycache__", "node_modules", "dist", "dist-ssr"]):
                 continue
 
             try:
