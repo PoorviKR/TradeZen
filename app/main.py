@@ -7,14 +7,15 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import func
+from sqlalchemy import func, text
 from sqlalchemy.exc import OperationalError, ProgrammingError, SQLAlchemyError
 
-from app.core.config import settings
+from app.core.config import settings, mask_token
 from app.api.v1 import api_router
 from app.db.session import SessionLocal
 from app.models.scenario import Scenario
 from app.services.upstox_client import UpstoxClient
+from app.services.data_health import check_data_health, set_startup_error
 from app.jobs.refresh_scenarios import refresh_scenarios
 
 logger = logging.getLogger("tradezen")
@@ -27,7 +28,7 @@ app = FastAPI(
     openapi_url=f"{settings.API_BASE_URL}/openapi.json",
 )
 
-# Helpful database exception handlers
+# Database exception handlers
 @app.exception_handler(OperationalError)
 async def operational_error_handler(request: Request, exc: OperationalError):
     logger.error("Database connection failure: %s", exc)
@@ -62,7 +63,7 @@ async def sqlalchemy_error_handler(request: Request, exc: SQLAlchemyError):
         content={"detail": f"Database error: {error_msg}"},
     )
 
-# CORS configuration supporting network/Wi-Fi devices and web clients
+# CORS configuration
 origins = settings.ALLOWED_ORIGINS if isinstance(settings.ALLOWED_ORIGINS, list) else [settings.ALLOWED_ORIGINS]
 
 app.add_middleware(
@@ -76,35 +77,78 @@ app.add_middleware(
 # Mount API routers under configured API base URL (e.g. /api/v1)
 app.include_router(api_router, prefix=settings.API_BASE_URL)
 
+_startup_lock = threading.Lock()
+ADVISORY_LOCK_ID = 842001
+
 
 def check_and_catch_up_scenarios():
-    """Checks if the scenario pool is behind and triggers background catch-up if needed."""
+    """Checks if the scenario pool is behind and triggers background catch-up if needed.
+
+    Uses PostgreSQL advisory lock to guarantee that multiple processes do not refresh at once.
+    Non-blocking: server starts immediately.
+    If Upstox call fails, records error in data-health and keeps serving existing scenarios.
+    """
     def _worker():
+        if not _startup_lock.acquire(blocking=False):
+            logger.info("Startup scenario catch-up thread is already running.")
+            return
+
+        lock_acquired_in_db = False
         try:
             with SessionLocal() as db:
-                client = UpstoxClient()
-                today = date.today()
-                recent_days = client.get_trading_days(today, 1)
-                last_trading_day = recent_days[-1]
+                is_pg = (db.bind.dialect.name == "postgresql") if db.bind else False
+                if is_pg:
+                    try:
+                        res = db.execute(text(f"SELECT pg_try_advisory_lock({ADVISORY_LOCK_ID})")).scalar()
+                        lock_acquired_in_db = bool(res)
+                        if not lock_acquired_in_db:
+                            logger.info("Another process holds the PostgreSQL advisory lock for scenario refresh. Skipping.")
+                            return
+                    except Exception as exc:
+                        logger.warning("Could not acquire advisory lock: %s", exc)
 
-                # Check active scenario count
-                active_count = (
-                    db.query(func.count(Scenario.id))
-                    .filter(Scenario.active.is_(True))
-                    .scalar()
-                    or 0
-                )
-                if active_count < 200:
-                    logger.info(
-                        "Scenario pool is behind (active scenarios: %d < 200). Running background catch-up...",
-                        active_count,
+                try:
+                    client = UpstoxClient()
+                    today = date.today()
+                    recent_days = client.get_trading_days(today, 1)
+                    last_trading_day = recent_days[-1]
+
+                    active_count = (
+                        db.query(func.count(Scenario.id))
+                        .filter(Scenario.active.is_(True))
+                        .scalar()
+                        or 0
                     )
-                    refresh_scenarios(target_date=last_trading_day, db_session=db, client=client)
-                    logger.info("Background scenario pool catch-up completed.")
-                else:
-                    logger.info("Scenario pool is up to date with %d active scenarios.", active_count)
+                    if active_count < 200:
+                        logger.info(
+                            "Scenario pool is behind (active scenarios: %d < 200). Running background catch-up...",
+                            active_count,
+                        )
+                        refresh_scenarios(target_date=last_trading_day, db_session=db, client=client)
+                        logger.info("Background scenario pool catch-up completed.")
+                    else:
+                        logger.info("Scenario pool is up to date with %d active scenarios.", active_count)
+
+                    set_startup_error(None)
+                except Exception as upstox_exc:
+                    masked = mask_token(settings.UPSTOX_ANALYTICS_TOKEN)
+                    logger.warning(
+                        "Upstox call failed during startup refresh (token: %s): %s. "
+                        "Continuing to serve existing active scenarios.",
+                        masked,
+                        upstox_exc,
+                    )
+                    set_startup_error(str(upstox_exc))
+                finally:
+                    if is_pg and lock_acquired_in_db:
+                        try:
+                            db.execute(text(f"SELECT pg_advisory_unlock({ADVISORY_LOCK_ID})"))
+                        except Exception as exc:
+                            logger.warning("Failed to release advisory lock: %s", exc)
         except Exception as exc:
             logger.info("Background scenario catch-up check skipped: %s", exc)
+        finally:
+            _startup_lock.release()
 
     thread = threading.Thread(target=_worker, daemon=True, name="scenario-catchup-worker")
     thread.start()
@@ -123,6 +167,13 @@ def on_startup():
         check_and_catch_up_scenarios()
 
 
+@app.get("/admin/data-health")
+def admin_data_health():
+    """Lightweight data health check for Upstox connection and scenario pool status."""
+    with SessionLocal() as db:
+        return check_data_health(db=db)
+
+
 @app.get("/")
 def root():
     """Root entrypoint returning application metadata and status."""
@@ -131,6 +182,7 @@ def root():
         "status": "online",
         "api_docs": f"{settings.API_BASE_URL}/docs",
         "health": f"{settings.API_BASE_URL}/health",
+        "data_health": "/admin/data-health",
     }
 
 

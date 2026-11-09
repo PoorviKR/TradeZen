@@ -6,13 +6,26 @@ Uses pathlib for cross-platform relative path resolution.
 """
 
 from pathlib import Path
-from typing import List, Union
-from pydantic import field_validator
+from typing import Any, List, Optional, Union
+from pydantic import Field, AliasChoices, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Cross-platform project root resolution using pathlib
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 ENV_PATH = PROJECT_ROOT / ".env"
+
+
+def mask_token(token: Optional[str]) -> str:
+    """Safely masks sensitive tokens for logging and debug output.
+
+    Never exposes secret token contents.
+    """
+    if not token:
+        return "<none>"
+    t = str(token).strip()
+    if len(t) <= 8:
+        return "***"
+    return f"{t[:4]}...{t[-4:]}"
 
 
 class Settings(BaseSettings):
@@ -27,13 +40,18 @@ class Settings(BaseSettings):
     DATABASE_URL: str
 
     # Security & Tokens (Secrets - no defaults in code)
-    JWT_SECRET: str
+    JWT_SECRET: str = Field(..., repr=False)
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
-    # Market Data
-    UPSTOX_ANALYTICS_TOKEN: str
+    # Market Data (Upstox Analytics Token with backward-compatible alias)
+    UPSTOX_ANALYTICS_TOKEN: str = Field(
+        ...,
+        validation_alias=AliasChoices("UPSTOX_ANALYTICS_TOKEN", "ANALYTICS_TOKEN"),
+        repr=False,
+    )
+    USE_SAMPLE_DATA: bool = False
 
     # API Routing & Networking
     API_BASE_URL: str = "/api/v1"
@@ -48,6 +66,22 @@ class Settings(BaseSettings):
         extra="ignore",
         case_sensitive=True,
     )
+
+    def __init__(self, **values: Any):
+        if "UPSTOX_ANALYTICS_TOKEN" not in values and "ANALYTICS_TOKEN" in values:
+            values["UPSTOX_ANALYTICS_TOKEN"] = values.pop("ANALYTICS_TOKEN")
+        super().__init__(**values)
+
+    @field_validator("UPSTOX_ANALYTICS_TOKEN", mode="before")
+    @classmethod
+    def validate_upstox_analytics_token(cls, v: Any) -> str:
+        """Validates that a non-empty Upstox Analytics Token is supplied."""
+        if v is None or not str(v).strip():
+            raise ValueError(
+                "UPSTOX_ANALYTICS_TOKEN is missing. Please provide a valid Upstox Analytics Token "
+                "in your .env file or environment variables under UPSTOX_ANALYTICS_TOKEN (or ANALYTICS_TOKEN)."
+            )
+        return str(v).strip()
 
     @field_validator("DATABASE_URL")
     @classmethod
@@ -79,6 +113,22 @@ class Settings(BaseSettings):
         if not v or len(v.strip()) < 8:
             raise ValueError("JWT_SECRET must be set and have a minimum length of 8 characters.")
         return v.strip()
+
+    def get_masked_analytics_token(self) -> str:
+        """Returns the masked version of the Upstox Analytics Token."""
+        return mask_token(self.UPSTOX_ANALYTICS_TOKEN)
+
+    def __repr__(self) -> str:
+        return (
+            f"Settings(PROJECT_NAME='{self.PROJECT_NAME}', "
+            f"ENVIRONMENT='{self.ENVIRONMENT}', "
+            f"UPSTOX_ANALYTICS_TOKEN='{self.get_masked_analytics_token()}', "
+            f"PORT={self.PORT}, "
+            f"HOST='{self.HOST}')"
+        )
+
+    def __str__(self) -> str:
+        return self.__repr__()
 
 
 # Singleton instance

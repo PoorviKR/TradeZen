@@ -67,6 +67,39 @@ def refresh_scenarios(
             db.close()
 
 
+from app.models.scenario import PoolReport
+
+
+def get_latest_pool_report(db_session: Optional[Session] = None) -> Optional[Dict[str, Any]]:
+    """Fetches the most recently recorded PoolReport from the database."""
+    owns_session = False
+    if db_session is None:
+        db = SessionLocal()
+        owns_session = True
+    else:
+        db = db_session
+
+    try:
+        report = db.query(PoolReport).order_by(PoolReport.id.desc()).first()
+        if not report:
+            return None
+        return {
+            "id": report.id,
+            "report_date": report.report_date,
+            "window_start": report.window_start,
+            "window_end": report.window_end,
+            "total_scenarios": report.total_scenarios,
+            "drop_count": report.drop_count,
+            "spike_count": report.spike_count,
+            "calm_count": report.calm_count,
+            "thresholds_used": report.thresholds_used,
+            "created_at": report.created_at.isoformat() if report.created_at else None,
+        }
+    finally:
+        if owns_session:
+            db.close()
+
+
 def main():
     """CLI entrypoint for python -m app.jobs.refresh_scenarios."""
     logging.basicConfig(
@@ -83,7 +116,31 @@ def main():
         default=None,
         help="Target date in YYYY-MM-DD format (defaults to current date)",
     )
+    parser.add_argument(
+        "--report-only",
+        action="store_true",
+        help="Print the latest stored pool_report without executing a refresh run",
+    )
     args = parser.parse_args()
+
+    if args.report_only:
+        try:
+            report = get_latest_pool_report()
+            if not report:
+                print("No pool_report found in database. Run the refresh job first.")
+                sys.exit(0)
+            print("Latest Pool Report:")
+            print(f"  Report Date:     {report['report_date']}")
+            print(f"  Window:          {report['window_start']} to {report['window_end']}")
+            print(f"  Total Scenarios: {report['total_scenarios']}")
+            print(f"  - Drops:         {report['drop_count']}")
+            print(f"  - Spikes:        {report['spike_count']}")
+            print(f"  - Calm:          {report['calm_count']}")
+            print(f"  Thresholds:      {report['thresholds_used']}")
+            sys.exit(0)
+        except Exception as exc:
+            print(f"Error fetching pool report: {exc}", file=sys.stderr)
+            sys.exit(1)
 
     target_date = None
     if args.date:

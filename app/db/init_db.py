@@ -29,6 +29,34 @@ def init_db() -> bool:
 
         logger.info("Creating all database tables via SQLAlchemy metadata...")
         Base.metadata.create_all(bind=engine)
+
+        # Self-healing column synchronization for future model extensions
+        from sqlalchemy import inspect
+        with engine.begin() as sync_conn:
+            inspector = inspect(sync_conn)
+            existing_tables = set(inspector.get_table_names())
+            for table_name, table in Base.metadata.tables.items():
+                if table_name in existing_tables:
+                    existing_cols = {col["name"] for col in inspector.get_columns(table_name)}
+                    for col in table.columns:
+                        if col.name not in existing_cols:
+                            col_type = col.type.compile(engine.dialect)
+                            default_clause = ""
+                            if col.server_default is not None:
+                                default_clause = f" DEFAULT {col.server_default.arg}"
+                            elif col.nullable:
+                                default_clause = " DEFAULT NULL"
+                            sql = f"ALTER TABLE {table_name} ADD COLUMN {col.name} {col_type}{default_clause};"
+                            logger.info("Self-healing schema migration: %s", sql)
+                            sync_conn.execute(text(sql))
+
+            # Ensure unique index for PostgreSQL upsert on raw_candles
+            if engine.dialect.name == "postgresql" and "raw_candles" in existing_tables:
+                sync_conn.execute(text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_raw_candles_symbol_timestamp "
+                    "ON raw_candles (symbol, timestamp);"
+                ))
+
         logger.info("Database tables initialized successfully!")
         return True
     except Exception as exc:

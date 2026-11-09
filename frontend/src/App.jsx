@@ -60,6 +60,30 @@ export default function App() {
   // History & Dashboard State
   const [pastAttempts, setPastAttempts] = useState([]);
   const [dashboardData, setDashboardData] = useState(null);
+  const [dataHealth, setDataHealth] = useState(null);
+
+  const formatPoolDate = (dateStr) => {
+    if (!dateStr) return '';
+    try {
+      const parts = dateStr.split('-');
+      if (parts.length < 3) return dateStr;
+      const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+      const mIdx = parseInt(parts[1], 10) - 1;
+      const day = parseInt(parts[2], 10);
+      return `${day} ${months[mIdx] || ''}`;
+    } catch {
+      return dateStr;
+    }
+  };
+
+  const loadDataHealth = async () => {
+    try {
+      const dh = await api.getDataHealth();
+      setDataHealth(dh);
+    } catch {
+      // quiet fallback
+    }
+  };
 
   useEffect(() => {
     // Initial user authentication check
@@ -72,7 +96,9 @@ export default function App() {
       .catch(() => {
         setCurrentUser(null);
       });
+    loadDataHealth();
   }, []);
+
 
   // Track decision time
   useEffect(() => {
@@ -575,6 +601,43 @@ export default function App() {
                 </div>
               </div>
             )}
+
+            {/* Market Data Status in Settings */}
+            <div className="pt-4 border-t border-borderDefault">
+              <span className="text-xs uppercase font-bold text-textSecondary block mb-2">
+                Market Data Status
+              </span>
+              {dataHealth ? (
+                <div
+                  className={`text-xs p-3 rounded border flex flex-wrap items-center justify-between gap-2 ${
+                    dataHealth.is_stale || dataHealth.status !== 'ok'
+                      ? 'bg-warningBg/20 border-warning/40 text-warning'
+                      : 'bg-bgTertiary border-borderDefault text-textSecondary'
+                  }`}
+                >
+                  <div>
+                    <span className="font-semibold text-textPrimary mr-1.5">
+                      Scenario pool {dataHealth.is_stale ? 'stale' : 'updated'}{' '}
+                      {dataHealth.pool_date_window?.end ? formatPoolDate(dataHealth.pool_date_window.end) : ''}
+                    </span>
+                    <span className="text-textTertiary">
+                      ({dataHealth.total_active_scenarios || 0} scenarios)
+                    </span>
+                  </div>
+                  <span
+                    className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                      dataHealth.status === 'ok' && !dataHealth.is_stale
+                        ? 'bg-successBg text-success border border-success/30'
+                        : 'bg-warningBg text-warning border border-warning/30'
+                    }`}
+                  >
+                    {dataHealth.status === 'ok' && !dataHealth.is_stale ? 'Connected' : 'Stale Pool'}
+                  </span>
+                </div>
+              ) : (
+                <div className="text-xs text-textTertiary">Loading market data status...</div>
+              )}
+            </div>
           </div>
         ) : activeTab === 'dashboard' ? (
           /* Dashboard View */
@@ -863,6 +926,25 @@ export default function App() {
           </div>
         )}
       </main>
+
+      {/* Small quiet data status line */}
+      <footer className="border-t border-borderDefault bg-bgSecondary/60 py-2.5 px-4 text-center">
+        {dataHealth ? (
+          <div className="inline-flex items-center space-x-2 text-[11px]">
+            {dataHealth.is_stale || dataHealth.status !== 'ok' ? (
+              <span className="text-warning bg-warningBg/30 border border-warning/40 px-2.5 py-0.5 rounded font-medium">
+                Scenario pool stale (updated {formatPoolDate(dataHealth.pool_date_window?.end)}; {dataHealth.total_active_scenarios || 0} scenarios)
+              </span>
+            ) : (
+              <span className="text-textTertiary">
+                Scenario pool updated {formatPoolDate(dataHealth.pool_date_window?.end)}; {dataHealth.total_active_scenarios || 0} scenarios
+              </span>
+            )}
+          </div>
+        ) : (
+          <span className="text-[11px] text-textTertiary">TradeZen Scenario Coach</span>
+        )}
+      </footer>
     </div>
   );
 }

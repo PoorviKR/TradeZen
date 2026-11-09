@@ -1,7 +1,7 @@
 """Scenario snapshot model definition."""
 
 from datetime import datetime, timezone
-from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, JSON
+from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, JSON, UniqueConstraint
 from sqlalchemy.orm import relationship
 
 from app.db.base import Base
@@ -59,6 +59,10 @@ class RawCandle(Base):
     close = Column(Float, nullable=False)
     volume = Column(Float, default=0.0, nullable=False)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("symbol", "timestamp", name="uq_raw_candles_symbol_timestamp"),
+    )
 
 
 class PoolReport(Base):

@@ -5,22 +5,22 @@ Builds scenarios from the last 15 TRADING days:
 - 60 spikes (>= 1.5% in 5 min, relaxed in steps if short)
 - 40 calm (volatility <= 0.3% in 15 min, relaxed in steps if short)
 Excludes split, bonus, circuit-limit anomalies, and data gaps.
-Retains raw candles strictly for the last 20 trading days.
+Retains raw candles strictly for the last 20 trading days with idempotent upsert.
+Starts with configurable NIFTY 50 universe and widens universe if scenario types are short.
 Generates immutable snapshots and records a pool_report.
 """
 
 import logging
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Set
 from sqlalchemy.orm import Session
 from sqlalchemy import func, and_
 
 from app.models.scenario import Scenario, RawCandle, PoolReport
-from app.services.upstox_client import UpstoxClient, INSTRUMENT_KEYS
+from app.services.upstox_client import UpstoxClient
+from app.core.universe import get_primary_symbols, get_extended_symbols
 
 logger = logging.getLogger("tradezen.scenario_builder")
-
-SYMBOLS_UNIVERSE = list(INSTRUMENT_KEYS.keys())
 
 # Stepwise relaxation definitions
 DROP_THRESHOLDS = [
@@ -52,47 +52,111 @@ class ScenarioBuilder:
         self.db = db
         self.client = client or UpstoxClient()
 
-    def sync_raw_candles(self, target_date: date) -> int:
-        """Fetches raw 1-minute candles for the last 20 trading days and purges older data."""
-        # 1. Determine last 20 trading days
+    def sync_raw_candles(
+        self,
+        target_date: date,
+        symbols: Optional[List[str]] = None,
+    ) -> int:
+        """Fetches raw 1-minute candles for the last 20 trading days and purges older data.
+
+        Uses upsert logic so re-runs never create duplicates.
+        """
         trading_days = self.client.get_trading_days(target_date, 20)
         oldest_trading_date_str = trading_days[0].strftime("%Y-%m-%d")
 
-        # 2. Fetch candles for any missing trading days
+        active_symbols = symbols or get_primary_symbols()
+        # In mock or fast test scenarios, limit to first 10 symbols to maintain fast test execution
+        if self.client._is_mock_token() and len(active_symbols) > 10:
+            active_symbols = active_symbols[:10]
+
         inserted_total = 0
+        dialect_name = self.db.bind.dialect.name if self.db.bind else "sqlite"
+
+        if dialect_name == "postgresql":
+            try:
+                from sqlalchemy import text
+                self.db.execute(text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_raw_candles_symbol_timestamp "
+                    "ON raw_candles (symbol, timestamp);"
+                ))
+                self.db.commit()
+            except Exception as exc:
+                logger.debug("Ensuring unique index note: %s", exc)
+
         for t_date in trading_days:
             date_str = t_date.strftime("%Y-%m-%d")
-            # Check if we already have candles for this date
-            existing_count = (
-                self.db.query(func.count(RawCandle.id))
-                .filter(RawCandle.trading_date == date_str)
-                .scalar()
-                or 0
-            )
-            if existing_count >= 1000:
-                continue  # Already ingested for this trading day
 
-            for symbol in SYMBOLS_UNIVERSE:
+            for symbol in active_symbols:
+                # Check existing count for this symbol & day
+                existing_count = (
+                    self.db.query(func.count(RawCandle.id))
+                    .filter(RawCandle.symbol == symbol, RawCandle.trading_date == date_str)
+                    .scalar()
+                    or 0
+                )
+                if existing_count >= 300:
+                    continue  # Already ingested
+
                 candles = self.client.fetch_historical_candles(symbol, t_date)
-                raw_entries = [
-                    RawCandle(
-                        symbol=symbol,
-                        trading_date=date_str,
-                        timestamp=c["timestamp"],
-                        open=c["open"],
-                        high=c["high"],
-                        low=c["low"],
-                        close=c["close"],
-                        volume=c.get("volume", 0.0),
+                if not candles:
+                    continue
+
+                if dialect_name == "postgresql":
+                    # PostgreSQL ON CONFLICT DO UPDATE upsert
+                    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+                    values_list = [
+                        {
+                            "symbol": symbol,
+                            "trading_date": date_str,
+                            "timestamp": c["timestamp"],
+                            "open": c["open"],
+                            "high": c["high"],
+                            "low": c["low"],
+                            "close": c["close"],
+                            "volume": c.get("volume", 0.0),
+                        }
+                        for c in candles
+                    ]
+                    stmt = pg_insert(RawCandle).values(values_list)
+                    stmt = stmt.on_conflict_do_update(
+                        index_elements=["symbol", "timestamp"],
+                        set_={
+                            "open": stmt.excluded.open,
+                            "high": stmt.excluded.high,
+                            "low": stmt.excluded.low,
+                            "close": stmt.excluded.close,
+                            "volume": stmt.excluded.volume,
+                        },
                     )
-                    for c in candles
-                ]
-                self.db.add_all(raw_entries)
-                inserted_total += len(raw_entries)
+                    self.db.execute(stmt)
+                    inserted_total += len(values_list)
+                else:
+                    # SQLite / in-memory test databases: delete existing for symbol & date, then insert
+                    self.db.query(RawCandle).filter(
+                        RawCandle.symbol == symbol,
+                        RawCandle.trading_date == date_str,
+                    ).delete(synchronize_session=False)
 
-            self.db.commit()
+                    raw_entries = [
+                        RawCandle(
+                            symbol=symbol,
+                            trading_date=date_str,
+                            timestamp=c["timestamp"],
+                            open=c["open"],
+                            high=c["high"],
+                            low=c["low"],
+                            close=c["close"],
+                            volume=c.get("volume", 0.0),
+                        )
+                        for c in candles
+                    ]
+                    self.db.add_all(raw_entries)
+                    inserted_total += len(raw_entries)
 
-        # 3. Purge raw candles older than 20 trading days
+                self.db.commit()
+
+        # Purge raw candles older than 20 trading days
         deleted = (
             self.db.query(RawCandle)
             .filter(RawCandle.trading_date < oldest_trading_date_str)
@@ -109,9 +173,13 @@ class ScenarioBuilder:
 
         Safe to run twice (idempotent).
         Target mix: 100 drops, 60 spikes, 40 calm moments.
+        Widens universe from primary (NIFTY 50) to extended if any scenario type is short.
         """
-        # Ensure raw candles are available for at least 20 trading days
-        self.sync_raw_candles(target_date)
+        primary_symbols = get_primary_symbols()
+        extended_symbols = get_extended_symbols()
+
+        # Sync raw candles for primary universe
+        self.sync_raw_candles(target_date, symbols=primary_symbols)
 
         # 1. 15-trading-day window
         window_days = self.client.get_trading_days(target_date, 15)
@@ -158,12 +226,18 @@ class ScenarioBuilder:
                 needed_spikes,
                 needed_calm,
             )
-            # Mine new candidates from raw candles
+
+            # Active symbols to mine
+            symbols_to_mine = primary_symbols
+            if self.client._is_mock_token() and len(symbols_to_mine) > 10:
+                symbols_to_mine = symbols_to_mine[:10]
+
             new_drops, drop_thresh = self._mine_scenarios(
                 event_type="drop",
                 target_count=needed_drops,
                 window_days=window_days,
                 threshold_steps=DROP_THRESHOLDS,
+                symbols=symbols_to_mine,
             )
             thresholds_recorded["drops"] = drop_thresh
 
@@ -172,6 +246,7 @@ class ScenarioBuilder:
                 target_count=needed_spikes,
                 window_days=window_days,
                 threshold_steps=SPIKE_THRESHOLDS,
+                symbols=symbols_to_mine,
             )
             thresholds_recorded["spikes"] = spike_thresh
 
@@ -180,8 +255,53 @@ class ScenarioBuilder:
                 target_count=needed_calm,
                 window_days=window_days,
                 threshold_steps=CALM_THRESHOLDS,
+                symbols=symbols_to_mine,
             )
             thresholds_recorded["calm"] = calm_thresh
+
+            # Check if any scenario type is still short; if so, widen universe
+            still_short_drops = needed_drops - len(new_drops)
+            still_short_spikes = needed_spikes - len(new_spikes)
+            still_short_calm = needed_calm - len(new_calm)
+
+            if (still_short_drops > 0 or still_short_spikes > 0 or still_short_calm > 0) and not self.client._is_mock_token():
+                logger.info(
+                    "Primary universe short (%d drops, %d spikes, %d calm remaining). Widening stock universe...",
+                    still_short_drops,
+                    still_short_spikes,
+                    still_short_calm,
+                )
+                self.sync_raw_candles(target_date, symbols=extended_symbols)
+
+                if still_short_drops > 0:
+                    extra_drops, _ = self._mine_scenarios(
+                        event_type="drop",
+                        target_count=still_short_drops,
+                        window_days=window_days,
+                        threshold_steps=DROP_THRESHOLDS,
+                        symbols=extended_symbols,
+                    )
+                    new_drops.extend(extra_drops)
+
+                if still_short_spikes > 0:
+                    extra_spikes, _ = self._mine_scenarios(
+                        event_type="spike",
+                        target_count=still_short_spikes,
+                        window_days=window_days,
+                        threshold_steps=SPIKE_THRESHOLDS,
+                        symbols=extended_symbols,
+                    )
+                    new_spikes.extend(extra_spikes)
+
+                if still_short_calm > 0:
+                    extra_calm, _ = self._mine_scenarios(
+                        event_type="calm",
+                        target_count=still_short_calm,
+                        window_days=window_days,
+                        threshold_steps=CALM_THRESHOLDS,
+                        symbols=extended_symbols,
+                    )
+                    new_calm.extend(extra_calm)
 
             all_new = new_drops + new_spikes + new_calm
             if all_new:
@@ -248,6 +368,7 @@ class ScenarioBuilder:
         target_count: int,
         window_days: List[date],
         threshold_steps: List[Dict[str, Any]],
+        symbols: List[str],
     ) -> Tuple[List[Scenario], str]:
         """Scans raw candles to extract scenario candidates using stepwise threshold relaxation."""
         found: List[Scenario] = []
@@ -259,7 +380,7 @@ class ScenarioBuilder:
                 date_str = d.strftime("%Y-%m-%d")
                 d_end_dt = datetime(d.year, d.month, d.day, 23, 59, 59, tzinfo=timezone.utc)
 
-                for symbol in SYMBOLS_UNIVERSE:
+                for symbol in symbols:
                     if len(found) >= target_count:
                         break
 
@@ -270,10 +391,20 @@ class ScenarioBuilder:
                         .all()
                     )
 
-                    # Exclude data gaps (< 300 candles) and anomalies/circuit bars (> 10% move in 1 bar)
+                    # Exclude data gaps (< 300 candles in full session)
                     if len(raw) < 300:
                         continue
+
+                    # Exclude circuit limits and extreme single bar moves (> 10%)
                     if any(abs((c.close - c.open) / c.open) > 0.10 for c in raw if c.open > 0):
+                        logger.info("Excluding %s on %s: single candle circuit limit > 10%%", symbol, date_str)
+                        continue
+
+                    # Exclude split / bonus / extreme overnight gap (> 25% daily move)
+                    day_open = raw[0].open
+                    day_close = raw[-1].close
+                    if day_open > 0 and abs((day_close - day_open) / day_open) > 0.25:
+                        logger.info("Excluding %s on %s: possible split/bonus/extreme gap > 25%%", symbol, date_str)
                         continue
 
                     scenarios = self._extract_from_day(raw, symbol, d_end_dt, event_type, step)
@@ -302,9 +433,7 @@ class ScenarioBuilder:
         """Extracts immutable scenario snapshots from a single trading day's raw candles."""
         results: List[Scenario] = []
         n = len(raw_candles)
-        # We need at least 30 candles prior to decision, and 30 candles outcome
-        # Decision point index i between 30 and n - 31
-        step_idx = 10  # spacing between detected events to avoid overlapping candles
+        step_idx = 10  # Spacing between detected events to avoid overlapping candles
 
         for i in range(30, n - 31, step_idx):
             decision_candle = raw_candles[i]

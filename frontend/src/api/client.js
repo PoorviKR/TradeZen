@@ -17,7 +17,12 @@ async function request(endpoint, options = {}, isRetry = false) {
     credentials: 'include', // Include httpOnly cookies across devices
   };
 
-  const response = await fetch(url, config);
+  let response;
+  try {
+    response = await fetch(url, config);
+  } catch (networkErr) {
+    throw new Error('Cannot reach backend server. Please ensure the backend is running (python -m app.main).');
+  }
 
   // Automatic token refresh on 401 if not already retrying or on auth routes
   if (
@@ -43,8 +48,29 @@ async function request(endpoint, options = {}, isRetry = false) {
   if (!response.ok) {
     let errorDetail = 'Request failed';
     try {
-      const err = await response.json();
-      errorDetail = err.detail || errorDetail;
+      const text = await response.text();
+      try {
+        const err = JSON.parse(text);
+        if (Array.isArray(err.detail)) {
+          errorDetail = err.detail.map((d) => d.msg || JSON.stringify(d)).join('; ');
+        } else if (typeof err.detail === 'string') {
+          errorDetail = err.detail;
+        } else if (typeof err === 'string') {
+          errorDetail = err;
+        }
+      } catch {
+        if (
+          response.status === 502 ||
+          response.status === 503 ||
+          response.status === 504 ||
+          text.includes('ECONNREFUSED') ||
+          text.includes('proxy error')
+        ) {
+          errorDetail = 'Backend server is unreachable on port 8000. Please start the backend with "python -m app.main".';
+        } else {
+          errorDetail = response.statusText || errorDetail;
+        }
+      }
     } catch {
       errorDetail = response.statusText || errorDetail;
     }
@@ -83,4 +109,6 @@ export const api = {
 
   // Health
   checkHealth: () => request('/health'),
+  getDataHealth: () => request('/admin/data-health'),
 };
+

@@ -6,6 +6,7 @@ from sqlalchemy import text
 
 from app.api.deps import get_db
 from app.core.config import settings
+from app.services.data_health import check_data_health
 
 router = APIRouter(tags=["health"])
 
@@ -34,3 +35,10 @@ def readiness(db: Session = Depends(get_db)):
         "database": db_status,
         "service": settings.PROJECT_NAME,
     }
+
+
+@router.get("/admin/data-health")
+def data_health(db: Session = Depends(get_db)):
+    """Exposes market data and scenario pool health without exposing secrets."""
+    return check_data_health(db=db)
+
