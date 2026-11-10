@@ -1,5 +1,7 @@
 import jwt
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from sqlalchemy import func, or_
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.api.deps import (
@@ -25,24 +27,43 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 @router.post("/signup", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 def signup(req: UserSignupRequest, db: Session = Depends(get_db)):
-    """Registers a new user account with argon2 password hashing."""
-    existing = db.query(User).filter(User.email == req.email).first()
-    if existing:
+    """Registers a new user account with argon2 password hashing and standardized identity fields."""
+    # 1. Check duplicate email (case-insensitive)
+    existing_email = db.query(User).filter(func.lower(User.email) == req.email.lower()).first()
+    if existing_email:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="A user with this email address already exists.",
         )
 
-    user = User(
-        email=req.email,
-        password_hash=hash_password(req.password),
-        display_name=req.display_name,
-        is_active=True,
-    )
-    db.add(user)
-    db.commit()
-    db.refresh(user)
-    return user
+    # 2. Check duplicate username (case-insensitive)
+    canonical_username = req.username.lower()
+    existing_username = db.query(User).filter(func.lower(User.username) == canonical_username).first()
+    if existing_username:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="A user with this username already exists.",
+        )
+
+    # 3. Create user entity with all canonical identity fields
+    try:
+        user = User(
+            username=canonical_username,
+            email=req.email,
+            password_hash=hash_password(req.password),
+            display_name=req.display_name,
+            is_active=True,
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        return user
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="An account with this email or username already exists.",
+        )
 
 
 @router.post("/login", response_model=TokenResponse)
@@ -52,19 +73,23 @@ def login(
     response: Response,
     db: Session = Depends(get_db),
 ):
-    """Logs in an existing user, setting secure cookies and returning token."""
+    """Logs in an existing user with either email or username, setting secure cookies and returning token."""
     client_ip = request.client.host if request.client else "unknown"
-    check_login_rate_limit(client_ip, req.email)
+    identifier = (req.username or req.email or "").lower().strip()
+    check_login_rate_limit(client_ip, identifier)
 
-    user = db.query(User).filter(User.email == req.email).first()
-    if not user or not verify_password(req.password, user.password_hash):
-        record_failed_login(client_ip, req.email)
+    user = db.query(User).filter(
+        or_(func.lower(User.email) == identifier, func.lower(User.username) == identifier)
+    ).first()
+
+    if not user or not user.is_active or not verify_password(req.password, user.password_hash):
+        record_failed_login(client_ip, identifier)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password.",
         )
 
-    clear_failed_logins(client_ip, req.email)
+    clear_failed_logins(client_ip, identifier)
 
     access_token = create_access_token(subject=str(user.id))
     refresh_token = create_refresh_token(subject=str(user.id))

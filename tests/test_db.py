@@ -19,6 +19,7 @@ def test_database_metadata_registered_tables():
 def test_user_cascade_deletion(db_session):
     """Verify that deleting a user cascades to rules and attempts."""
     user = User(
+        username="cascade_user",
         email="cascade_test@example.com",
         password_hash=hash_password("Pass123!"),
         display_name="Cascade User",
@@ -67,3 +68,43 @@ def test_bot_decision_creation(db_session, sample_scenario):
     assert bot_dec.id is not None
     assert bot_dec.actor_type == "bot"
     assert bot_dec.true_label == "panic_sell"
+
+
+def test_user_username_uniqueness(db_session):
+    """Verify that unique username constraint is enforced at database level."""
+    from sqlalchemy.exc import IntegrityError
+
+    u1 = User(
+        username="unique_trader",
+        email="trader_a@example.com",
+        password_hash=hash_password("Pass123!"),
+        display_name="Trader A",
+    )
+    db_session.add(u1)
+    db_session.commit()
+
+    u2 = User(
+        username="unique_trader",
+        email="trader_b@example.com",
+        password_hash=hash_password("Pass123!"),
+        display_name="Trader B",
+    )
+    db_session.add(u2)
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+    db_session.rollback()
+
+
+def test_user_auto_derives_username_if_omitted(db_session):
+    """Verify that User model automatically generates clean username if omitted."""
+    u = User(
+        email="auto_derived@example.com",
+        password_hash=hash_password("Pass123!"),
+        display_name="Auto Derived Trader",
+    )
+    assert u.username is not None
+    assert u.username == "auto_derived_trader"
+    db_session.add(u)
+    db_session.commit()
+    db_session.refresh(u)
+    assert u.id is not None

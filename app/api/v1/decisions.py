@@ -2,7 +2,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func
 
 from app.api.deps import get_db, get_current_user
@@ -105,6 +105,7 @@ def submit_decision(
     # 2. History features (shared function for user, bots, and training)
     past_attempts = (
         db.query(Attempt)
+        .options(joinedload(Attempt.prediction))
         .filter(
             Attempt.user_id == current_user.id,
             Attempt.actor_type == "human",
@@ -275,6 +276,7 @@ def get_dashboard(
 
     attempts = (
         db.query(Attempt)
+        .options(joinedload(Attempt.prediction))
         .filter(
             Attempt.user_id == current_user.id,
             Attempt.actor_type == "human",

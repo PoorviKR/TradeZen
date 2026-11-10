@@ -60,11 +60,14 @@ async function request(endpoint, options = {}, isRetry = false) {
         }
       } catch {
         if (
+          response.status === 500 ||
           response.status === 502 ||
           response.status === 503 ||
           response.status === 504 ||
+          !text ||
           text.includes('ECONNREFUSED') ||
-          text.includes('proxy error')
+          text.includes('proxy error') ||
+          text.includes('Internal Server Error')
         ) {
           errorDetail = 'Backend server is unreachable on port 8000. Please start the backend with "python -m app.main".';
         } else {

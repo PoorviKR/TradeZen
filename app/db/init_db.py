@@ -41,14 +41,35 @@ def init_db() -> bool:
                     for col in table.columns:
                         if col.name not in existing_cols:
                             col_type = col.type.compile(engine.dialect)
-                            default_clause = ""
-                            if col.server_default is not None:
-                                default_clause = f" DEFAULT {col.server_default.arg}"
-                            elif col.nullable:
-                                default_clause = " DEFAULT NULL"
-                            sql = f"ALTER TABLE {table_name} ADD COLUMN {col.name} {col_type}{default_clause};"
+                            # Add as nullable first to allow backfilling existing rows
+                            sql = f"ALTER TABLE {table_name} ADD COLUMN {col.name} {col_type} DEFAULT NULL;"
                             logger.info("Self-healing schema migration: %s", sql)
                             sync_conn.execute(text(sql))
+
+                            # Specific backfill for users.username if it was just added
+                            if table_name == "users" and col.name == "username":
+                                if engine.dialect.name == "postgresql":
+                                    sync_conn.execute(text(
+                                        "UPDATE users SET username = LOWER(REGEXP_REPLACE(SPLIT_PART(email, '@', 1), '[^a-zA-Z0-9_]', '_', 'g')) "
+                                        "WHERE username IS NULL;"
+                                    ))
+                                    # Fallback in case any row had empty prefix
+                                    sync_conn.execute(text(
+                                        "UPDATE users SET username = 'user_' || id WHERE username IS NULL OR LENGTH(username) < 3;"
+                                    ))
+                                    sync_conn.execute(text("ALTER TABLE users ALTER COLUMN username SET NOT NULL;"))
+                                    sync_conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_users_username ON users (username);"))
+                                else:
+                                    sync_conn.execute(text(
+                                        "UPDATE users SET username = 'user_' || id WHERE username IS NULL;"
+                                    ))
+
+                            # For other non-nullable columns, apply default if specified
+                            elif not col.nullable and col.server_default is not None:
+                                default_val = col.server_default.arg
+                                sync_conn.execute(text(f"UPDATE {table_name} SET {col.name} = {default_val} WHERE {col.name} IS NULL;"))
+                                if engine.dialect.name == "postgresql":
+                                    sync_conn.execute(text(f"ALTER TABLE {table_name} ALTER COLUMN {col.name} SET NOT NULL;"))
 
             # Ensure unique index for PostgreSQL upsert on raw_candles
             if engine.dialect.name == "postgresql" and "raw_candles" in existing_tables:

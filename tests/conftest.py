@@ -63,6 +63,7 @@ def client(db_session):
 def test_user(db_session) -> User:
     """Creates a standard test user."""
     user = User(
+        username="testuser",
         email="testuser@example.com",
         password_hash=hash_password("Password123!"),
         display_name="Test User",

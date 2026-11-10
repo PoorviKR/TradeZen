@@ -27,7 +27,9 @@ export default function App() {
   const [activeTab, setActiveTab] = useState('trainer'); // 'trainer' | 'rules' | 'dashboard' | 'history'
   const [authMode, setAuthMode] = useState('login'); // 'login' | 'signup'
   const [authEmail, setAuthEmail] = useState('');
+  const [authUsername, setAuthUsername] = useState('');
   const [authPassword, setAuthPassword] = useState('');
+  const [authConfirmPassword, setAuthConfirmPassword] = useState('');
   const [authDisplayName, setAuthDisplayName] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
 
@@ -149,15 +151,21 @@ export default function App() {
     setErrorMessage('');
     try {
       if (authMode === 'signup') {
+        if (authPassword !== authConfirmPassword) {
+          setErrorMessage('Passwords do not match. Please re-enter your password.');
+          return;
+        }
         await api.signup({
-          email: authEmail,
+          username: authUsername.trim() || undefined,
+          display_name: authDisplayName.trim() || authUsername.trim(),
+          email: authEmail.trim(),
           password: authPassword,
-          display_name: authDisplayName,
+          password_confirm: authConfirmPassword,
         });
-        const res = await api.login({ email: authEmail, password: authPassword });
+        const res = await api.login({ email: authEmail.trim(), password: authPassword });
         setCurrentUser(res.user);
       } else {
-        const res = await api.login({ email: authEmail, password: authPassword });
+        const res = await api.login({ email: authEmail.trim(), password: authPassword });
         setCurrentUser(res.user);
       }
       setActiveTab('trainer');
@@ -428,27 +436,51 @@ export default function App() {
 
             <form onSubmit={handleAuthSubmit} className="space-y-4">
               {authMode === 'signup' && (
-                <div>
-                  <label className="block text-xs uppercase tracking-wider text-textSecondary mb-1 font-semibold">Display Name</label>
-                  <input
-                    type="text"
-                    required
-                    value={authDisplayName}
-                    onChange={(e) => setAuthDisplayName(e.target.value)}
-                    className="w-full bg-bgTertiary border border-borderDefault rounded px-3 py-2.5 text-textPrimary focus:border-accentPrimary focus:outline-none min-h-[44px]"
-                    placeholder="Trader Alex"
-                  />
-                </div>
+                <>
+                  <div>
+                    <label className="block text-xs uppercase tracking-wider text-textSecondary mb-1 font-semibold">
+                      Username
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      minLength={3}
+                      maxLength={50}
+                      value={authUsername}
+                      onChange={(e) => setAuthUsername(e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, ''))}
+                      className="w-full bg-bgTertiary border border-borderDefault rounded px-3 py-2.5 text-textPrimary focus:border-accentPrimary focus:outline-none min-h-[44px]"
+                      placeholder="trader_alex"
+                    />
+                    <span className="text-[10px] text-textTertiary mt-0.5 block">
+                      3-50 characters: letters, numbers, underscores, hyphens
+                    </span>
+                  </div>
+                  <div>
+                    <label className="block text-xs uppercase tracking-wider text-textSecondary mb-1 font-semibold">
+                      Display Name
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={authDisplayName}
+                      onChange={(e) => setAuthDisplayName(e.target.value)}
+                      className="w-full bg-bgTertiary border border-borderDefault rounded px-3 py-2.5 text-textPrimary focus:border-accentPrimary focus:outline-none min-h-[44px]"
+                      placeholder="Trader Alex"
+                    />
+                  </div>
+                </>
               )}
               <div>
-                <label className="block text-xs uppercase tracking-wider text-textSecondary mb-1 font-semibold">Email Address</label>
+                <label className="block text-xs uppercase tracking-wider text-textSecondary mb-1 font-semibold">
+                  {authMode === 'login' ? 'Email Address or Username' : 'Email Address'}
+                </label>
                 <input
-                  type="email"
+                  type={authMode === 'signup' ? 'email' : 'text'}
                   required
                   value={authEmail}
                   onChange={(e) => setAuthEmail(e.target.value)}
                   className="w-full bg-bgTertiary border border-borderDefault rounded px-3 py-2.5 text-textPrimary focus:border-accentPrimary focus:outline-none min-h-[44px]"
-                  placeholder="trader@example.com"
+                  placeholder={authMode === 'login' ? 'trader@example.com or trader_alex' : 'trader@example.com'}
                 />
               </div>
               <div>
@@ -463,6 +495,22 @@ export default function App() {
                   placeholder="••••••••"
                 />
               </div>
+              {authMode === 'signup' && (
+                <div>
+                  <label className="block text-xs uppercase tracking-wider text-textSecondary mb-1 font-semibold">
+                    Confirm Password
+                  </label>
+                  <input
+                    type="password"
+                    required
+                    minLength={8}
+                    value={authConfirmPassword}
+                    onChange={(e) => setAuthConfirmPassword(e.target.value)}
+                    className="w-full bg-bgTertiary border border-borderDefault rounded px-3 py-2.5 text-textPrimary focus:border-accentPrimary focus:outline-none min-h-[44px]"
+                    placeholder="••••••••"
+                  />
+                </div>
+              )}
 
               <button
                 type="submit"

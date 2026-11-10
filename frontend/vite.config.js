@@ -30,6 +30,16 @@ export default defineConfig(({ mode }) => {
           target: target,
           changeOrigin: true,
           secure: false,
+          configure: (proxy) => {
+            proxy.on('error', (err, req, res) => {
+              if (res && res.writeHead && !res.headersSent) {
+                res.writeHead(503, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({
+                  detail: 'Backend server is unreachable on port 8000. Please start the backend with "python -m app.main".'
+                }));
+              }
+            });
+          },
         },
       },
     },
