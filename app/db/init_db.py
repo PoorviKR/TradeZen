@@ -78,6 +78,12 @@ def init_db() -> bool:
                     "ON raw_candles (symbol, timestamp);"
                 ))
 
+        # Sync scn_reasons catalogue table idempotently
+        from app.db.session import SessionLocal
+        from app.core.reasons import sync_reasons_table
+        with SessionLocal() as db:
+            sync_reasons_table(db)
+
         logger.info("Database tables initialized successfully!")
         return True
     except Exception as exc:

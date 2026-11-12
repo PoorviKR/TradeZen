@@ -1,11 +1,20 @@
+"""Decisions, feedback, prediction rating, and progress dashboard router."""
+
 import logging
-from datetime import datetime, timezone
 from typing import Any, Dict, List
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func
 
 from app.api.deps import get_db, get_current_user
+from app.core.reasons import (
+    CATALOGUE_VERSION,
+    KIND_LABELS,
+    VALID_KINDS,
+    get_reason,
+    map_legacy_reason,
+    resolve_and_validate_reason,
+)
 from app.models.user import User
 from app.models.rule import Rule
 from app.models.scenario import Scenario
@@ -18,11 +27,34 @@ from app.schemas.decision import (
 )
 from app.services.rule_checker import check_user_rules
 from app.services.features import compute_history_features, extract_feature_vector
-from app.ml.predictor import MLPredictor
+from app.ml.predictor import MLPredictor, FeatureMismatchError
 from app.ml.explainer import explain_text
 
 logger = logging.getLogger("tradezen.decisions")
 router = APIRouter(tags=["decisions & progress"])
+
+MIN_KIND_SAMPLE_SIZE = 5
+MIN_REASON_SAMPLE_SIZE = 3
+
+
+def _is_attempt_disciplined(att: Attempt) -> int:
+    """Determines whether an attempt was disciplined (1) or a mistake/rule-break (0)."""
+    lbl = att.prediction.label if att.prediction else "disciplined"
+    if lbl == "disciplined":
+        return 1
+    if lbl in ("rules_only", "unavailable"):
+        feats = (att.prediction.features if att.prediction else None) or {}
+        violated = any(
+            float(feats.get(k, 0.0)) > 0.0
+            for k in (
+                "rule_violates_max_trades",
+                "rule_violates_position_size",
+                "rule_violates_averaging_down",
+                "consistency_has_contradiction",
+            )
+        )
+        return 0 if violated else 1
+    return 0
 
 
 @router.post("/decisions", response_model=FeedbackResponse, status_code=status.HTTP_201_CREATED)
@@ -33,10 +65,27 @@ def submit_decision(
 ):
     """Submits a trading decision on a scenario and returns three-part feedback:
 
-    1. User's Rules check
-    2. Pattern classification (trained model / SHAP template)
+    1. User's Rules check (including plain-code consistency checks)
+    2. Pattern classification (trained model / SHAP template, or rules-only fallback)
     3. User's personal history
     """
+    # Validate action-reason pair upfront -> friendly 422 on invalid pair
+    try:
+        resolved_reason = resolve_and_validate_reason(
+            action=decision_in.action,
+            reason_code=decision_in.reason_code,
+            reason_text=decision_in.reason,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        )
+
+    resolved_code = resolved_reason.code
+    resolved_kind = resolved_reason.kind
+    display_reason = resolved_reason.label
+
     scenario = db.query(Scenario).filter(Scenario.id == decision_in.scenario_id).first()
     if not scenario:
         raise HTTPException(
@@ -44,14 +93,12 @@ def submit_decision(
             detail="Scenario not found",
         )
 
-    # Get active rule for user
     active_rule = (
         db.query(Rule)
         .filter(Rule.user_id == current_user.id, Rule.is_current.is_(True))
         .first()
     )
     if not active_rule:
-        # Create default rules if none exist yet
         active_rule = Rule(
             user_id=current_user.id,
             version=1,
@@ -66,7 +113,6 @@ def submit_decision(
         db.commit()
         db.refresh(active_rule)
 
-    # Determine attempt number and season
     season_no = getattr(current_user, "current_season", 1)
 
     last_attempt = (
@@ -82,7 +128,6 @@ def submit_decision(
 
     attempt_no = 1 if not last_attempt else last_attempt.attempt_no + 1
 
-    # Count trades today in current season
     trades_today = (
         db.query(func.count(Attempt.id))
         .filter(
@@ -94,12 +139,14 @@ def submit_decision(
         or 0
     ) + 1
 
-    # 1. Deterministic Rule check
+    # 1. Deterministic Rule check & plain-code consistency checks
     rules_feedback = check_user_rules(
         rule=active_rule,
         scenario=scenario,
         decision=decision_in,
         user_trades_today=trades_today,
+        resolved_reason_code=resolved_code,
+        resolved_reason_kind=resolved_kind,
     )
 
     # 2. History features (shared function for user, bots, and training)
@@ -118,25 +165,33 @@ def submit_decision(
 
     prior_decisions = [
         {
-            "label": a.prediction.label if a.prediction else "disciplined",
+            "label": (
+                a.prediction.label
+                if a.prediction and a.prediction.label not in ("rules_only", "unavailable")
+                else ("disciplined" if _is_attempt_disciplined(a) else "averaging_down")
+            ),
             "decision_seconds": a.decision_seconds,
             "size": a.size,
             "action": a.action,
             "reason": a.reason,
+            "reason_code": a.reason_code,
         }
         for a in reversed(past_attempts)
     ]
     history_features = compute_history_features(prior_decisions)
 
-    # 3. Decision-time feature vector known at decision time
+    # 3. Decision-time feature vector
     feature_vec = extract_feature_vector(
         action=decision_in.action,
         size=decision_in.size,
-        reason=decision_in.reason,
+        reason=display_reason,
+        reason_code=resolved_code,
+        reason_kind=resolved_kind,
         decision_seconds=decision_in.decision_seconds,
         chart_viewed=decision_in.chart_viewed,
         scenario_drop_pct=scenario.drop_pct,
         scenario_current_price=scenario.current_price,
+        scenario_entry_price=scenario.entry_price,
         scenario_trades_today=trades_today,
         scenario_last_trade_was_loss=scenario.last_trade_was_loss,
         scenario_event_type=scenario.event_type,
@@ -148,7 +203,7 @@ def submit_decision(
         history_features=history_features,
     )
 
-    # 4. ML Pattern detection & SHAP explanation
+    # 4. ML Pattern detection & SHAP explanation (with rules-only fallback if missing/mismatched)
     try:
         predictor = MLPredictor.get_instance()
         ml_result = predictor.predict(feature_vec)
@@ -157,29 +212,44 @@ def submit_decision(
         reasons_list = [r["feature"].replace("_", " ") for r in ml_result["reasons"]]
         explanation = explain_text(feature_vec, ml_result["reasons"], predicted_label=detected_label)
         model_version = ml_result["model_version"]
+        pattern_available = True
+    except (FileNotFoundError, FeatureMismatchError) as exc:
+        logger.warning("ML model missing or feature mismatch; falling back to rules-only: %s", exc)
+        detected_label = "rules_only"
+        prob = 0.0
+        reasons_list = []
+        explanation = "pattern feedback not available yet"
+        model_version = "rules-only"
+        pattern_available = False
     except Exception as exc:
         logger.warning("ML inference fallback used: %s", exc)
-        detected_label = "disciplined" if rules_feedback.passed else "averaging_down"
-        prob = 0.85
-        reasons_list = ["Rule alignment" if rules_feedback.passed else "Rule departure"]
-        explanation = "Decision evaluated against your defined trading rules."
-        model_version = "v1.0.0"
+        detected_label = "rules_only"
+        prob = 0.0
+        reasons_list = []
+        explanation = "pattern feedback not available yet"
+        model_version = "rules-only"
+        pattern_available = False
 
     pattern_feedback = PatternResult(
         label=detected_label,
         probability=prob,
         reasons=reasons_list,
         explanation=explanation,
+        available=pattern_available,
     )
 
     # 5. Personal History feedback (past 10 decisions)
     if len(past_attempts) < 3:
-        history_feedback = f"Early progress: {len(past_attempts)} decision(s) recorded so far. Continue practicing to unlock personalized behavioral trend analysis."
+        history_feedback = (
+            f"Early progress: {len(past_attempts)} decision(s) recorded so far. "
+            "Continue practicing to unlock personalized behavioral trend analysis."
+        )
     else:
         mistake_cnt = int(history_features["history_mistake_count"])
         history_feedback = f"In your last {len(past_attempts)} decisions: {mistake_cnt} pattern deviation(s) noted."
 
     # Save Attempt
+    clean_note = decision_in.note.strip() if decision_in.note and decision_in.note.strip() else None
     attempt = Attempt(
         user_id=current_user.id,
         scenario_id=decision_in.scenario_id,
@@ -187,7 +257,13 @@ def submit_decision(
         actor_type="human",
         action=decision_in.action,
         size=decision_in.size,
-        reason=decision_in.reason,
+        reason=display_reason,
+        reason_code=resolved_code,
+        reason_kind=resolved_kind,
+        catalogue_version=CATALOGUE_VERSION,
+        migrated=False,
+        note=clean_note,
+        rule_version=active_rule.version,
         decision_seconds=decision_in.decision_seconds,
         chart_viewed=decision_in.chart_viewed,
         after_reveal=decision_in.after_reveal or (attempt_no > 1),
@@ -215,6 +291,9 @@ def submit_decision(
         history_feedback=history_feedback,
         attempt_id=attempt.id,
         attempt_no=attempt.attempt_no,
+        reason_code=resolved_code,
+        reason_kind=resolved_kind,
+        catalogue_version=CATALOGUE_VERSION,
     )
 
 
@@ -258,25 +337,129 @@ def restart_progress(
     }
 
 
+def _build_reason_analytics(attempts: List[Attempt]) -> Dict[str, Any]:
+    """Computes reason-kind breakdown and reason-vs-outcome summaries with sample gating."""
+    total = len(attempts)
+    kind_counts: Dict[str, int] = {k: 0 for k in VALID_KINDS}
+    reason_groups: Dict[tuple, Dict[str, Any]] = {}
+
+    for att in attempts:
+        r_code = att.reason_code
+        r_kind = att.reason_kind
+        if not r_code or not r_kind:
+            mapped = map_legacy_reason(att.reason, att.action)
+            r_code = r_code or mapped.code
+            r_kind = r_kind or mapped.kind
+
+        if r_kind not in kind_counts:
+            r_kind = "unsure"
+        kind_counts[r_kind] += 1
+
+        is_disc = _is_attempt_disciplined(att)
+        rdef = get_reason(r_code)
+        r_label = rdef.label if rdef else (att.reason or r_code)
+
+        key = (r_code, att.action)
+        grp = reason_groups.get(key)
+        if grp is None:
+            grp = {
+                "reason_code": r_code,
+                "reason_label": r_label,
+                "reason_kind": r_kind,
+                "action": att.action,
+                "count": 0,
+                "disciplined_count": 0,
+                "outcomes_10m": [],
+                "outcomes_30m": [],
+                "action_outcomes_10m": [],
+            }
+            reason_groups[key] = grp
+
+        grp["count"] += 1
+        grp["disciplined_count"] += is_disc
+
+        sc = att.scenario
+        if sc is not None:
+            if sc.outcome_10m is not None:
+                o10 = float(sc.outcome_10m)
+                grp["outcomes_10m"].append(o10)
+                directional = -o10 if att.action == "sell" else o10
+                grp["action_outcomes_10m"].append(directional)
+            if sc.outcome_30m is not None:
+                grp["outcomes_30m"].append(float(sc.outcome_30m))
+
+    kind_items = [
+        {
+            "kind": k,
+            "label": KIND_LABELS.get(k, k.title()),
+            "count": kind_counts[k],
+            "pct": round((kind_counts[k] / total) * 100.0, 1) if total > 0 else 0.0,
+        }
+        for k in VALID_KINDS
+    ]
+
+    reason_vs_outcome_items: List[Dict[str, Any]] = []
+    for grp in sorted(reason_groups.values(), key=lambda g: g["count"], reverse=True):
+        cnt = grp["count"]
+        meets_min = cnt >= MIN_REASON_SAMPLE_SIZE
+        o10_list = grp["outcomes_10m"]
+        o30_list = grp["outcomes_30m"]
+        act_o10_list = grp["action_outcomes_10m"]
+
+        reason_vs_outcome_items.append({
+            "reason_code": grp["reason_code"],
+            "reason_label": grp["reason_label"],
+            "reason_kind": grp["reason_kind"],
+            "action": grp["action"],
+            "count": cnt,
+            "min_sample_size": MIN_REASON_SAMPLE_SIZE,
+            "meets_min_sample": meets_min,
+            "disciplined_pct": round((grp["disciplined_count"] / cnt) * 100.0, 1) if meets_min else None,
+            "outcome_sample_count": len(o10_list),
+            "avg_outcome_10m": (
+                round(sum(o10_list) / len(o10_list), 2)
+                if meets_min and len(o10_list) >= MIN_REASON_SAMPLE_SIZE
+                else None
+            ),
+            "avg_outcome_30m": (
+                round(sum(o30_list) / len(o30_list), 2)
+                if meets_min and len(o30_list) >= MIN_REASON_SAMPLE_SIZE
+                else None
+            ),
+            "avg_action_outcome_10m": (
+                round(sum(act_o10_list) / len(act_o10_list), 2)
+                if meets_min and len(act_o10_list) >= MIN_REASON_SAMPLE_SIZE
+                else None
+            ),
+        })
+
+    return {
+        "reason_kind_breakdown": {
+            "total_decisions": total,
+            "min_sample_size": MIN_KIND_SAMPLE_SIZE,
+            "has_enough_data": total >= MIN_KIND_SAMPLE_SIZE,
+            "data_notice": "sufficient data" if total >= MIN_KIND_SAMPLE_SIZE else "not enough data yet",
+            "items": kind_items,
+        },
+        "reason_vs_outcome": {
+            "min_sample_size": MIN_REASON_SAMPLE_SIZE,
+            "has_enough_data": any(item["meets_min_sample"] for item in reason_vs_outcome_items),
+            "items": reason_vs_outcome_items,
+        },
+    }
+
+
 @router.get("/progress/dashboard")
 def get_dashboard(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Calculates comprehensive dashboard metrics:
-
-    - Mistakes by type over time
-    - Repeated mistakes list
-    - Improvement (attempt 1 versus changed answers)
-    - Rule-keeping meter (%)
-    - Discipline score trend
-    - Backing decision count claim and 'not enough data yet' under 10 decisions
-    """
+    """Calculates comprehensive dashboard metrics including reason-kind and reason-vs-outcome."""
     current_season = getattr(current_user, "current_season", 1)
 
     attempts = (
         db.query(Attempt)
-        .options(joinedload(Attempt.prediction))
+        .options(joinedload(Attempt.prediction), joinedload(Attempt.scenario))
         .filter(
             Attempt.user_id == current_user.id,
             Attempt.actor_type == "human",
@@ -288,6 +471,7 @@ def get_dashboard(
 
     total_decisions = len(attempts)
     if total_decisions == 0:
+        empty_reason_analytics = _build_reason_analytics([])
         return {
             "status": "empty",
             "message": "No decisions yet. Play your first practice scenario to start tracking progress!",
@@ -295,18 +479,16 @@ def get_dashboard(
             "season": current_season,
             "has_enough_data": False,
             "data_notice": "not enough data yet",
+            **empty_reason_analytics,
         }
 
-    # Attempt 1 blind vs revisions
     attempt1_list = [a for a in attempts if a.attempt_no == 1]
     revisions_list = [a for a in attempts if a.attempt_no > 1]
 
-    # Map scenario_id to attempts
     scenario_attempts: Dict[int, List[Attempt]] = {}
     for a in attempts:
         scenario_attempts.setdefault(a.scenario_id, []).append(a)
 
-    # Mistakes breakdown
     mistake_counts = {
         "panic_sell": 0,
         "averaging_down": 0,
@@ -319,17 +501,17 @@ def get_dashboard(
         "fomo_buy": "FOMO Buy",
         "revenge_trade": "Revenge Trade",
         "disciplined": "Disciplined",
+        "rules_only": "Rules Evaluated",
     }
 
     disciplined_count = 0
     timeline: List[Dict[str, Any]] = []
     rolling_scores: List[Dict[str, Any]] = []
-
     recent_window: List[int] = []
 
     for idx, att in enumerate(attempts, start=1):
         lbl = att.prediction.label if att.prediction else "disciplined"
-        is_disc = 1 if lbl == "disciplined" else 0
+        is_disc = _is_attempt_disciplined(att)
         if is_disc:
             disciplined_count += 1
         elif lbl in mistake_counts:
@@ -347,6 +529,8 @@ def get_dashboard(
             "friendly_label": friendly_names.get(lbl, lbl),
             "is_mistake": 0 if is_disc else 1,
             "attempt_no": att.attempt_no,
+            "reason_code": att.reason_code,
+            "reason_kind": att.reason_kind,
         })
 
         rolling_scores.append({
@@ -355,7 +539,6 @@ def get_dashboard(
             "date": att.created_at.strftime("%H:%M") if att.created_at else f"#{idx}",
         })
 
-    # Repeated mistakes list (mistakes that occurred >= 2 times)
     repeated_mistakes = [
         {
             "type": m_type,
@@ -368,17 +551,12 @@ def get_dashboard(
     ]
     repeated_mistakes.sort(key=lambda x: x["count"], reverse=True)
 
-    # Improvement calculation (attempt 1 mistake -> revised attempt disciplined)
     improved_scenarios = 0
     scenarios_revised = 0
-    for sc_id, sc_atts in scenario_attempts.items():
+    for sc_atts in scenario_attempts.values():
         if len(sc_atts) > 1:
             scenarios_revised += 1
-            first_att = sc_atts[0]
-            last_att = sc_atts[-1]
-            first_lbl = first_att.prediction.label if first_att.prediction else "disciplined"
-            last_lbl = last_att.prediction.label if last_att.prediction else "disciplined"
-            if first_lbl != "disciplined" and last_lbl == "disciplined":
+            if _is_attempt_disciplined(sc_atts[0]) == 0 and _is_attempt_disciplined(sc_atts[-1]) == 1:
                 improved_scenarios += 1
 
     improvement_pct = round((improved_scenarios / max(1, scenarios_revised)) * 100, 1) if scenarios_revised > 0 else 0.0
@@ -386,6 +564,7 @@ def get_dashboard(
     discipline_score = rule_compliance_pct
 
     has_enough_data = total_decisions >= 10
+    reason_analytics = _build_reason_analytics(attempts)
 
     return {
         "status": "active",
@@ -408,4 +587,5 @@ def get_dashboard(
         },
         "discipline_trend": rolling_scores,
         "timeline": timeline,
+        **reason_analytics,
     }

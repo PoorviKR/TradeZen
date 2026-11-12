@@ -20,10 +20,12 @@ from sklearn.pipeline import Pipeline
 from sklearn.metrics import f1_score, accuracy_score, confusion_matrix, classification_report
 from xgboost import XGBClassifier
 
+from app.core.reasons import CATALOGUE_VERSION
 from app.db.session import SessionLocal
 from app.models.scenario import Scenario
 from app.models.decision import Attempt, BotDecision, Prediction
 from app.services.features import FEATURE_COLUMNS, LABEL_CLASSES, extract_feature_vector
+from app.services.bots import populate_bot_decisions
 from app.ml.predictor import MLPredictor, MODELS_DIR
 
 logger = logging.getLogger("tradezen.ml.retrain")
@@ -50,11 +52,19 @@ def retrain_model(
         current_macro_f1 = float(current_bundle.get("metrics", {}).get("macro_f1", 0.0))
         fixed_test_ids = set(current_bundle.get("fixed_test_scenario_ids", []))
         current_version = current_bundle.get("model_version", "v1.0.0")
+        schema_upgraded = not predictor.is_feature_compatible()
 
         label_to_int = {lbl: idx for idx, lbl in enumerate(LABEL_CLASSES)}
 
-        # 2. Gather Bot Training Data
-        bot_rows = db.query(BotDecision).filter(BotDecision.actor_type == "bot").all()
+        # 2. Gather Bot Training Data for active catalogue version
+        bot_rows = (
+            db.query(BotDecision)
+            .filter(
+                BotDecision.actor_type == "bot",
+                BotDecision.catalogue_version == CATALOGUE_VERSION,
+            )
+            .all()
+        )
         if len(bot_rows) < 20:
             active_scenarios = db.query(Scenario).filter(Scenario.active.is_(True)).all()
             if not active_scenarios:
@@ -62,8 +72,15 @@ def retrain_model(
                 from datetime import date
                 ScenarioBuilder(db).build_pool(date(2026, 11, 6))
             else:
-                populate_bot_decisions(db, active_scenarios)
-            bot_rows = db.query(BotDecision).filter(BotDecision.actor_type == "bot").all()
+                populate_bot_decisions(db, active_scenarios, catalogue_version=CATALOGUE_VERSION)
+            bot_rows = (
+                db.query(BotDecision)
+                .filter(
+                    BotDecision.actor_type == "bot",
+                    BotDecision.catalogue_version == CATALOGUE_VERSION,
+                )
+                .all()
+            )
 
         available_scenario_ids = list({bd.scenario_id for bd in bot_rows})
         scenario_test_ids = fixed_test_ids.intersection(available_scenario_ids)
@@ -171,7 +188,8 @@ def retrain_model(
         )
 
         # 5. Check promotion criterion: candidate macro-F1 must be >= current active
-        is_promoted = candidate_f1 >= current_macro_f1
+        # (or promote automatically when upgrading from an incompatible feature schema)
+        is_promoted = schema_upgraded or (candidate_f1 >= current_macro_f1)
 
         if not new_version:
             # Generate next patch/minor version string

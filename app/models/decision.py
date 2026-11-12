@@ -20,7 +20,13 @@ class Attempt(Base):
     
     action = Column(String(20), nullable=False)  # 'buy', 'sell', 'hold'
     size = Column(Float, nullable=False)
-    reason = Column(String(50), nullable=False)  # Fear, FOMO, Recover loss, Followed my rule, etc.
+    reason = Column(String(200), nullable=False)  # Legacy or label text
+    reason_code = Column(String(50), nullable=True, index=True)
+    reason_kind = Column(String(20), nullable=True, index=True)
+    catalogue_version = Column(String(20), nullable=True, index=True)
+    migrated = Column(Boolean, default=False, server_default="false", nullable=False)
+    note = Column(String(300), nullable=True)
+    rule_version = Column(Integer, nullable=True)
     decision_seconds = Column(Float, nullable=False)
     chart_viewed = Column(Boolean, default=True, nullable=False)
     after_reveal = Column(Boolean, default=False, nullable=False)
@@ -45,7 +51,11 @@ class BotDecision(Base):
     true_label = Column(String(50), nullable=False)  # Actual behavior shown
     action = Column(String(20), nullable=False)
     size = Column(Float, nullable=False)
-    reason = Column(String(50), nullable=False)
+    reason = Column(String(120), nullable=False)
+    reason_code = Column(String(50), nullable=True, index=True)
+    reason_kind = Column(String(20), nullable=True, index=True)
+    catalogue_version = Column(String(20), nullable=True, index=True)
+    migrated = Column(Boolean, default=False, server_default="false", nullable=False)
     decision_seconds = Column(Float, nullable=False)
     features = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)

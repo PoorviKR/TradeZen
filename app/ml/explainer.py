@@ -1,13 +1,16 @@
 """Plain-sentence explanation generator driven by SHAP top reasons.
 
-- Uses predefined sentence templates with 2 wording variants per feature.
+- Uses predefined sentence templates with 2 wording variants per feature and per reason code.
 - Strictly uses the user's own numbers from the decision row.
 - Appends one fixed 'try this instead' line per mistake type.
+- Provides a safe fallback sentence for unknown reason codes.
 - Never calls an LLM, never shows raw SHAP numbers.
 - Guarantees that any numbers in the output text are present in the input row.
 """
 
 from typing import Any, Dict, List, Optional
+
+UNKNOWN_REASON_FALLBACK = "You recorded a decision reason outside the standard catalogue."
 
 # Two wording variants per feature using numbers strictly present in row
 FEATURE_TEMPLATES: Dict[str, List[str]] = {
@@ -47,30 +50,152 @@ FEATURE_TEMPLATES: Dict[str, List[str]] = {
         "You chose to hold and keep your current exposure.",
         "Your decision was to stay on the sidelines and hold.",
     ],
-    "reason_fear": [
-        "You selected fear as your primary decision trigger.",
-        "Your stated motivation was fear of further decline.",
+    # BUY reason codes (2 variants each)
+    "reason_code_BUY_PLANNED": [
+        "You indicated this buy matched your predefined entry plan.",
+        "Your stated reason was executing a planned buy setup.",
     ],
-    "reason_recover": [
-        "Your stated reason was wanting to recover a prior loss.",
-        "You indicated a desire to recover lost capital as your motivation.",
+    "reason_code_BUY_ADD_WINNER": [
+        "You chose to buy as a way of adding to a winning position.",
+        "Your stated rationale was scaling into an existing winner.",
     ],
-    "reason_fomo": [
-        "You noted FOMO as your reason for entering.",
-        "Your trade was driven by fear of missing out on the move.",
+    "reason_code_BUY_DIP_CHEAP": [
+        "You bought because the price dipped and looked cheap.",
+        "Your stated reason was buying a dip at an attractive price.",
     ],
-    "reason_rule": [
-        "You cited following your predefined trading plan as your reason.",
-        "Your stated rationale was following your established rules.",
+    "reason_code_BUY_BALANCE_LOSS": [
+        "You bought more shares to average down and balance a loss.",
+        "Your stated motivation was lowering your average cost during a loss.",
     ],
-    "reason_social": [
-        "You acted on a social tip or external commentary.",
-        "External commentary or social sentiment was your primary reason.",
+    "reason_code_BUY_RECOVER_LOSS": [
+        "You bought in an effort to recover a previous loss.",
+        "Your stated trigger was trying to win back lost capital.",
     ],
-    "reason_analysis": [
-        "Your decision was based on technical chart analysis.",
-        "You followed your own technical analysis for this entry.",
+    "reason_code_BUY_FOMO": [
+        "You bought out of FOMO while price was running away.",
+        "Your entry was driven by fear of missing out on the move.",
     ],
+    "reason_code_BUY_TIP": [
+        "You placed this buy based on an external tip or social call.",
+        "Your stated motivation was following an outside tip or commentary.",
+    ],
+    "reason_code_BUY_UNSURE": [
+        "You entered a buy without a clear reason or out of uncertainty.",
+        "Your stated reason for buying was being unsure.",
+    ],
+    # HOLD reason codes (2 variants each)
+    "reason_code_HOLD_PLAN_INTACT": [
+        "You held because your trading plan remained intact and your stop was untouched.",
+        "Your stated reason for holding was that your plan was still valid.",
+    ],
+    "reason_code_HOLD_LET_PROFIT_RUN": [
+        "You held to let an open winning trade continue running.",
+        "Your stated rationale was giving a profitable move room to run.",
+    ],
+    "reason_code_HOLD_WAIT_CONFIRM": [
+        "You held while waiting for clearer confirmation on the chart.",
+        "Your stated reason was pausing for confirmation before acting.",
+    ],
+    "reason_code_HOLD_WAIT_BREAKEVEN": [
+        "You held in hopes the trade would return to breakeven.",
+        "Your stated motivation was waiting to get back to your entry price.",
+    ],
+    "reason_code_HOLD_AVOID_LOSS": [
+        "You held because you did not want to book an open loss.",
+        "Your stated reason was avoiding realizing a loss on the position.",
+    ],
+    "reason_code_HOLD_FROZEN": [
+        "You held because you felt frozen and unsure how to react.",
+        "Your decision to hold stemmed from hesitation and feeling stuck.",
+    ],
+    "reason_code_HOLD_TIP": [
+        "You held based on an outside tip advising you not to exit.",
+        "Your stated reason for holding was following someone else's advice.",
+    ],
+    "reason_code_HOLD_UNSURE": [
+        "You held while unsure of what action to take.",
+        "Your stated reason for holding was uncertainty.",
+    ],
+    # SELL reason codes (2 variants each)
+    "reason_code_SELL_STOP_HIT": [
+        "You sold because your predefined stop-loss level was hit.",
+        "Your stated exit reason was respecting a triggered stop-loss.",
+    ],
+    "reason_code_SELL_TARGET": [
+        "You sold because your profit target was reached.",
+        "Your stated rationale was taking profits at your planned target.",
+    ],
+    "reason_code_SELL_PROTECT_CAPITAL": [
+        "You sold to protect your capital according to your risk rules.",
+        "Your stated reason was preserving capital in line with your rule.",
+    ],
+    "reason_code_SELL_PANIC": [
+        "You sold in panic out of fear of a larger drop.",
+        "Your exit was driven by fear and panic during the decline.",
+    ],
+    "reason_code_SELL_EARLY_PROFIT": [
+        "You sold early to lock in a small profit out of fear.",
+        "Your stated motivation was grabbing an early profit before your target.",
+    ],
+    "reason_code_SELL_FRUSTRATED": [
+        "You exited because you felt frustrated with how the trade moved.",
+        "Your stated reason for selling was frustration with the position.",
+    ],
+    "reason_code_SELL_TIP": [
+        "You sold after hearing an external tip or news commentary.",
+        "Your exit was prompted by outside commentary rather than your plan.",
+    ],
+    "reason_code_SELL_UNSURE": [
+        "You exited the trade while feeling unsure.",
+        "Your stated reason for selling was uncertainty.",
+    ],
+    # Reason kind features (2 variants each)
+    "reason_kind_plan": [
+        "Your stated reason falls under plan-based reasoning.",
+        "You selected a rule-aligned, plan-based rationale.",
+    ],
+    "reason_kind_mixed": [
+        "Your stated reason reflects mixed discretionary and plan judgment.",
+        "You selected a mixed rationale combining chart judgment and discretion.",
+    ],
+    "reason_kind_emotion": [
+        "Your stated reason reflects an emotion-driven impulse.",
+        "You selected an emotionally driven rationale for this trade.",
+    ],
+    "reason_kind_external": [
+        "Your stated reason relies on external tips or commentary.",
+        "You based this decision on outside input rather than your rules.",
+    ],
+    "reason_kind_unsure": [
+        "Your stated reason indicates uncertainty about the setup.",
+        "You noted uncertainty as your reason for this decision.",
+    ],
+    # Consistency flags (2 variants each)
+    "consistency_sell_stop_not_hit": [
+        "You cited a stop-loss exit even though the price drop had not reached your stop.",
+        "Your stop-loss reason did not match the actual move against your stop threshold.",
+    ],
+    "consistency_hold_past_stop": [
+        "You cited your plan being intact even though the loss was already past your stop.",
+        "Holding under a plan-intact reason conflicted with the breach of your stop-loss.",
+    ],
+    "consistency_add_winner_in_loss": [
+        "You cited adding to a winner while the position was actually in a loss.",
+        "The add-to-winner reason contradicted the current losing price move.",
+    ],
+    "consistency_averaging_against_rule": [
+        "Your stated averaging or recovery reason directly conflicted with your no-averaging-down rule.",
+        "You selected an averaging-down rationale despite your rule prohibiting it.",
+    ],
+    "consistency_plan_contradicts_numbers": [
+        "Your plan-based reason contradicted the scenario numbers or your active rule limits.",
+        "There was a mismatch between your stated plan reason and the scenario metrics.",
+    ],
+    "consistency_has_contradiction": [
+        "A mismatch was detected between your chosen reason and the trade numbers.",
+        "Your stated reason conflicted with your active rules or scenario conditions.",
+    ],
+    # Market & rule context
     "current_price": [
         "The market price stood at {val} at decision time.",
         "The asset was trading at {val} when your order was placed.",
@@ -195,6 +320,17 @@ TRY_THIS_INSTEAD: Dict[str, str] = {
 }
 
 
+def explain_reason_code(reason_code: Optional[str], variant_idx: int = 0) -> str:
+    """Renders a plain-sentence explanation for a reason code with safe unknown fallback."""
+    if not reason_code:
+        return UNKNOWN_REASON_FALLBACK
+    feat_key = f"reason_code_{reason_code.strip().upper()}"
+    variants = FEATURE_TEMPLATES.get(feat_key)
+    if not variants:
+        return UNKNOWN_REASON_FALLBACK
+    return variants[variant_idx % len(variants)]
+
+
 def explain_text(
     row: Dict[str, Any],
     reasons: List[Dict[str, Any]],
@@ -203,7 +339,8 @@ def explain_text(
     """Renders plain sentences from SHAP top reasons and row values.
 
     Guarantees:
-    - Exactly 2 wording variants available per feature.
+    - 2 wording variants available per feature and per new reason code.
+    - Safe fallback sentence for unknown reason codes.
     - Numbers in text originate strictly from row.
     - No LLM and no raw SHAP float values shown.
     """
@@ -216,10 +353,13 @@ def explain_text(
 
     for idx, r in enumerate(reasons[:3]):
         feat_name = r.get("feature", "")
+        if feat_name.startswith("reason_code_") and feat_name not in FEATURE_TEMPLATES:
+            reason_sentences.append(UNKNOWN_REASON_FALLBACK)
+            continue
+
         if feat_name not in FEATURE_TEMPLATES:
             continue
 
-        # If the feature is not in the row, skip to avoid inserting default numbers
         if feat_name not in row:
             continue
 
@@ -227,14 +367,16 @@ def explain_text(
         val_str = str(raw_val)
         int_val_str = str(int(raw_val)) if isinstance(raw_val, (int, float)) else val_str
 
-        # Pick variant 0 or 1 based on index
         variant_idx = idx % 2
         template = FEATURE_TEMPLATES[feat_name][variant_idx]
 
-        # Check secondary fields
         if "{int_max_trades}" in template:
             if "max_trades_per_day" in row:
-                int_max_trades = str(int(row["max_trades_per_day"])) if isinstance(row["max_trades_per_day"], (int, float)) else str(row["max_trades_per_day"])
+                int_max_trades = (
+                    str(int(row["max_trades_per_day"]))
+                    if isinstance(row["max_trades_per_day"], (int, float))
+                    else str(row["max_trades_per_day"])
+                )
             else:
                 template = "You took {int_val} trades today."
                 int_max_trades = ""
@@ -260,6 +402,5 @@ def explain_text(
 
     instead_line = TRY_THIS_INSTEAD.get(label, TRY_THIS_INSTEAD["disciplined"])
 
-    # Combine into plain sentences
     parts = [lead] + reason_sentences + [instead_line]
     return " ".join(parts)

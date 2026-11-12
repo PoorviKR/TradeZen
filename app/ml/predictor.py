@@ -2,6 +2,7 @@
 
 - Loads trained model bundle from disk once in under 1 second.
 - Creates SHAP explainer once at startup and reuses it for all predictions.
+- Validates that the model's stored feature list matches FEATURE_COLUMNS.
 - Returns top predicted label, probabilities distribution, and top 3 SHAP reasons.
 - Never shows raw SHAP float values to users.
 """
@@ -22,6 +23,10 @@ logger = logging.getLogger("tradezen.ml.predictor")
 MODELS_DIR = Path(__file__).resolve().parent / "models"
 
 
+class FeatureMismatchError(RuntimeError):
+    """Raised when the loaded model's stored feature list does not match FEATURE_COLUMNS."""
+
+
 class MLPredictor:
     """Singleton service for behavioral pattern prediction and SHAP feature attribution."""
 
@@ -40,8 +45,8 @@ class MLPredictor:
         self.model = self.bundle["model"]
         self.model_type = self.bundle.get("model_type", "xgboost")
         self.model_version = self.bundle.get("model_version", "v1.0.0")
-        self.classes: List[str] = self.bundle.get("classes", LABEL_CLASSES)
-        self.feature_names: List[str] = self.bundle.get("feature_names", FEATURE_COLUMNS)
+        self.classes: List[str] = list(self.bundle.get("classes", LABEL_CLASSES))
+        self.feature_names: List[str] = list(self.bundle.get("feature_names") or [])
 
         # Create SHAP explainer once at startup
         t_explainer = time.time()
@@ -49,13 +54,18 @@ class MLPredictor:
         self.explainer_init_time_seconds = time.time() - t_explainer
 
         logger.info(
-            "MLPredictor initialized in %.3fs (load: %.3fs, explainer: %.3fs) with model %s (%s)",
+            "MLPredictor initialized in %.3fs (load: %.3fs, explainer: %.3fs) with model %s (%s, features_match=%s)",
             time.time() - t0,
             self.load_time_seconds,
             self.explainer_init_time_seconds,
             self.model_version,
             self.model_type,
+            self.is_feature_compatible(),
         )
+
+    def is_feature_compatible(self) -> bool:
+        """Returns True iff the model's stored feature list matches FEATURE_COLUMNS."""
+        return list(self.feature_names) == list(FEATURE_COLUMNS)
 
     @classmethod
     def get_instance(cls, force_reload: bool = False) -> "MLPredictor":
@@ -78,7 +88,6 @@ class MLPredictor:
             except Exception as exc:
                 logger.warning("Could not read active_model.json: %s", exc)
 
-        # Fallback to any available joblib file in models directory
         joblib_files = list(MODELS_DIR.glob("*.joblib"))
         if joblib_files:
             joblib_files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
@@ -92,32 +101,28 @@ class MLPredictor:
             if self.model_type == "xgboost":
                 return shap.TreeExplainer(self.model)
             else:
-                # For LogisticRegression pipeline or linear models
-                # Create a small zero/mean baseline background matrix
-                background = np.zeros((1, len(self.feature_names)), dtype=np.float32)
+                n_feats = len(self.feature_names) or len(FEATURE_COLUMNS)
+                background = np.zeros((1, n_feats), dtype=np.float32)
                 clf = self.model.named_steps["clf"] if hasattr(self.model, "named_steps") else self.model
                 return shap.Explainer(clf, background)
         except Exception as exc:
-            logger.warning("SHAP explainer init warning (%s), using tree explainer fallback", exc)
-            return shap.Explainer(self.model)
+            logger.warning("SHAP explainer init warning (%s), using explainer fallback", exc)
+            return None
 
     def predict(self, row: Dict[str, Any]) -> Dict[str, Any]:
         """Predicts behavioural pattern, probability distribution, and top 3 SHAP reasons.
 
-        Returns:
-            {
-                "label": top_label,
-                "probability": float,
-                "probabilities": {class: prob},
-                "reasons": [{"feature": name, "value": val}, ...],
-                "model_version": version_str
-            }
+        Raises FeatureMismatchError if the model's stored feature list does not match FEATURE_COLUMNS.
         """
-        # Prepare feature vector matching canonical order
+        if not self.is_feature_compatible():
+            raise FeatureMismatchError(
+                f"Model {self.model_version} feature list ({len(self.feature_names)} features) "
+                f"does not match current FEATURE_COLUMNS ({len(FEATURE_COLUMNS)} features)."
+            )
+
         feature_vals = [float(row.get(col, 0.0)) for col in self.feature_names]
         X = np.array([feature_vals], dtype=np.float32)
 
-        # 1. Probabilities and top class
         if hasattr(self.model, "predict_proba"):
             probs = self.model.predict_proba(X)[0]
         else:
@@ -127,22 +132,20 @@ class MLPredictor:
         top_label = self.classes[top_idx]
         top_prob = float(probs[top_idx])
 
-        # 2. Extract top 3 SHAP reasons
         reasons: List[Dict[str, Any]] = []
         try:
+            if self.explainer is None:
+                raise RuntimeError("SHAP explainer unavailable")
             shap_output = self.explainer(X)
             vals = shap_output.values if hasattr(shap_output, "values") else shap_output
 
             if vals.ndim == 3:
-                # Shape: (1, n_features, n_classes)
                 class_shap = vals[0, :, top_idx]
             elif vals.ndim == 2:
-                # Shape: (1, n_features)
                 class_shap = vals[0, :]
             else:
                 class_shap = np.array(vals).flatten()
 
-            # Identify top 3 features with highest positive push towards this class
             pos_indices = [i for i in range(len(self.feature_names)) if class_shap[i] > 0]
             if len(pos_indices) >= 3:
                 top_indices = sorted(pos_indices, key=lambda i: class_shap[i], reverse=True)[:3]
@@ -157,7 +160,6 @@ class MLPredictor:
                 })
         except Exception as exc:
             logger.warning("SHAP attribution fallback: %s", exc)
-            # Fallback: identify top 3 non-zero active feature signals in row
             active_feats = [
                 col for col in ["decision_seconds", "trades_today", "drop_pct", "size_pct_of_capital"]
                 if float(row.get(col, 0.0)) > 0

@@ -26,6 +26,7 @@ from sklearn.metrics import f1_score, accuracy_score, confusion_matrix, classifi
 from xgboost import XGBClassifier
 from sqlalchemy.orm import Session
 
+from app.core.reasons import CATALOGUE_VERSION
 from app.db.session import SessionLocal
 from app.models.scenario import Scenario
 from app.models.decision import BotDecision
@@ -53,22 +54,30 @@ def train_model(
         owns_session = True
 
     try:
-        # 1. Fetch bot decisions
+        # 1. Fetch bot decisions for current catalogue version
         bot_rows = (
             db.query(BotDecision)
-            .filter(BotDecision.actor_type == "bot")
+            .filter(
+                BotDecision.actor_type == "bot",
+                BotDecision.catalogue_version == CATALOGUE_VERSION,
+            )
             .all()
         )
 
-        # If no bot decisions exist yet, attempt to populate them
+        # If no versioned bot decisions exist yet, populate them
         if len(bot_rows) < 50:
-            logger.info("Bot decision rows (%d) low. Checking active scenarios to populate...", len(bot_rows))
-            populate_bot_decisions(db)
+            logger.info("Bot decision rows (%d) low for %s. Checking active scenarios to populate...", len(bot_rows), CATALOGUE_VERSION)
+            populate_bot_decisions(db, catalogue_version=CATALOGUE_VERSION)
             bot_rows = (
                 db.query(BotDecision)
-                .filter(BotDecision.actor_type == "bot")
+                .filter(
+                    BotDecision.actor_type == "bot",
+                    BotDecision.catalogue_version == CATALOGUE_VERSION,
+                )
                 .all()
             )
+            if not bot_rows:
+                bot_rows = db.query(BotDecision).filter(BotDecision.actor_type == "bot").all()
 
         if len(bot_rows) < 10:
             raise ValueError(
@@ -177,6 +186,7 @@ def train_model(
 
         metrics = {
             "model_version": model_version,
+            "catalogue_version": CATALOGUE_VERSION,
             "selected_model": selected_type,
             "macro_f1": round(float(best_f1), 4),
             "accuracy": round(float(best_acc), 4),

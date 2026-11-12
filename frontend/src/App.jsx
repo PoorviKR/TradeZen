@@ -49,7 +49,10 @@ export default function App() {
   const [currentIndex, setCurrentIndex] = useState(0);
   const [selectedAction, setSelectedAction] = useState('buy'); // 'buy' | 'sell' | 'hold'
   const [decisionSize, setDecisionSize] = useState(10000);
-  const [decisionReason, setDecisionReason] = useState('Followed my rule');
+  const [selectedReasonCode, setSelectedReasonCode] = useState('');
+  const [reasonsByAction, setReasonsByAction] = useState({});
+  const [reasonsLoading, setReasonsLoading] = useState(false);
+  const [decisionError, setDecisionError] = useState('');
   const [decisionNote, setDecisionNote] = useState('');
   const [decisionSeconds, setDecisionSeconds] = useState(5.0);
   const [scenarioStartTime, setScenarioStartTime] = useState(Date.now());
@@ -106,6 +109,41 @@ export default function App() {
   useEffect(() => {
     setScenarioStartTime(Date.now());
   }, [currentIndex]);
+
+  // Load action-dependent reasons from single source of truth
+  useEffect(() => {
+    if (!currentUser || !selectedAction) return;
+    if (reasonsByAction[selectedAction]) return;
+    let cancelled = false;
+    setReasonsLoading(true);
+    api
+      .getReasons(selectedAction)
+      .then((res) => {
+        if (!cancelled && res?.reasons) {
+          setReasonsByAction((prev) => ({
+            ...prev,
+            [selectedAction]: res.reasons.slice(0, 8),
+          }));
+        }
+      })
+      .catch((err) => {
+        console.error('Failed to load reasons for action', selectedAction, err);
+      })
+      .finally(() => {
+        if (!cancelled) setReasonsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [currentUser, selectedAction, reasonsByAction]);
+
+  const handleActionChange = (newAction) => {
+    if (newAction !== selectedAction) {
+      setSelectedAction(newAction);
+      setSelectedReasonCode(''); // Changing the action clears the reason
+      setDecisionError('');
+    }
+  };
 
   const loadRules = async () => {
     try {
@@ -213,10 +251,18 @@ export default function App() {
     const currentScenario = scenarios[currentIndex];
     if (!currentScenario) return;
 
+    if (!selectedReasonCode) {
+      setDecisionError('Please choose a reason for your decision before submitting.');
+      return;
+    }
+
     const seconds = Math.max(1.0, Math.round((Date.now() - scenarioStartTime) / 100) / 10);
     setDecisionSeconds(seconds);
+    setDecisionError('');
 
-    const fullReason = decisionNote.trim() ? `${decisionReason} - ${decisionNote.trim()}` : decisionReason;
+    const activeReasons = reasonsByAction[selectedAction] || [];
+    const selectedReasonObj = activeReasons.find((r) => r.code === selectedReasonCode);
+    const reasonLabel = selectedReasonObj?.label || selectedReasonCode;
 
     try {
       setLoading(true);
@@ -224,7 +270,9 @@ export default function App() {
         scenario_id: currentScenario.id,
         action: selectedAction,
         size: parseFloat(decisionSize),
-        reason: fullReason,
+        reason_code: selectedReasonCode,
+        reason: reasonLabel,
+        note: decisionNote.trim() || null,
         decision_seconds: seconds,
         chart_viewed: true,
         after_reveal: Boolean(revealData || isRevisionMode),
@@ -238,7 +286,8 @@ export default function App() {
           attempt_no: res.attempt_no,
           action: selectedAction,
           size: decisionSize,
-          reason: fullReason,
+          reason: reasonLabel,
+          reason_code: selectedReasonCode,
           label: res.pattern_feedback?.label,
           passed: res.rules_feedback?.passed,
           timestamp: new Date().toLocaleTimeString(),
@@ -247,7 +296,7 @@ export default function App() {
         ...prev,
       ]);
     } catch (err) {
-      alert(`Error submitting decision: ${err.message}`);
+      setDecisionError(err.message || 'Error submitting decision');
     } finally {
       setLoading(false);
     }
@@ -266,6 +315,8 @@ export default function App() {
 
   const handleChangeAnswer = () => {
     setFeedback(null);
+    setSelectedReasonCode('');
+    setDecisionError('');
     setIsRevisionMode(true);
   };
 
@@ -273,6 +324,8 @@ export default function App() {
     setFeedback(null);
     setRevealData(null);
     setIsRevisionMode(false);
+    setSelectedReasonCode('');
+    setDecisionError('');
     setDecisionNote('');
     if (currentIndex + 1 < scenarios.length) {
       setCurrentIndex(currentIndex + 1);
@@ -286,6 +339,8 @@ export default function App() {
     setCurrentIndex(0);
     setFeedback(null);
     setRevealData(null);
+    setSelectedReasonCode('');
+    setDecisionError('');
     setIsRevisionMode(true); // Flagged as revision (attempt 2+)
     setActiveTab('trainer');
     try {
@@ -826,7 +881,7 @@ export default function App() {
                       <div className="grid grid-cols-3 gap-2 sm:gap-3">
                         <button
                           type="button"
-                          onClick={() => setSelectedAction('buy')}
+                          onClick={() => handleActionChange('buy')}
                           className={`py-3 px-3 rounded-lg text-xs sm:text-sm font-extrabold flex items-center justify-center space-x-1.5 transition-all min-h-[48px] ${
                             selectedAction === 'buy'
                               ? 'bg-gain text-black shadow-lg ring-2 ring-gain/50'
@@ -838,7 +893,7 @@ export default function App() {
                         </button>
                         <button
                           type="button"
-                          onClick={() => setSelectedAction('sell')}
+                          onClick={() => handleActionChange('sell')}
                           className={`py-3 px-3 rounded-lg text-xs sm:text-sm font-extrabold flex items-center justify-center space-x-1.5 transition-all min-h-[48px] ${
                             selectedAction === 'sell'
                               ? 'bg-loss text-white shadow-lg ring-2 ring-loss/50'
@@ -850,7 +905,7 @@ export default function App() {
                         </button>
                         <button
                           type="button"
-                          onClick={() => setSelectedAction('hold')}
+                          onClick={() => handleActionChange('hold')}
                           className={`py-3 px-3 rounded-lg text-xs sm:text-sm font-extrabold flex items-center justify-center space-x-1.5 transition-all min-h-[48px] ${
                             selectedAction === 'hold'
                               ? 'bg-accentPrimary text-white shadow-lg ring-2 ring-accentPrimary/50'
@@ -863,43 +918,72 @@ export default function App() {
                       </div>
                     </div>
 
-                    {/* Sizing & Reason Selectors */}
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 sm:gap-4">
-                      <div>
-                        <label className="block text-xs uppercase tracking-wider text-textSecondary mb-1 font-semibold">
-                          2. Position Size (₹)
+                    {/* Position Sizing */}
+                    <div>
+                      <label className="block text-xs uppercase tracking-wider text-textSecondary mb-1 font-semibold">
+                        2. Position Size (₹)
+                      </label>
+                      <input
+                        type="number"
+                        step="1000"
+                        value={decisionSize}
+                        onChange={(e) => setDecisionSize(e.target.value)}
+                        className="w-full bg-bgTertiary border border-borderDefault rounded px-3 py-2.5 text-textPrimary focus:border-accentPrimary focus:outline-none min-h-[44px]"
+                      />
+                      <span className="text-[11px] text-textTertiary mt-1 block">
+                        Rule limit: {maxPosition}% (₹{Math.round(practiceCapital * (maxPosition / 100)).toLocaleString()})
+                      </span>
+                    </div>
+
+                    {/* Action-Dependent Touch-Friendly Reason Chips (max 8) */}
+                    <div>
+                      <div className="flex items-center justify-between mb-2">
+                        <label className="block text-xs uppercase tracking-wider text-textSecondary font-bold">
+                          3. Reason for <span className="text-accentPrimary">{selectedAction.toUpperCase()}</span> Decision
                         </label>
-                        <input
-                          type="number"
-                          step="1000"
-                          value={decisionSize}
-                          onChange={(e) => setDecisionSize(e.target.value)}
-                          className="w-full bg-bgTertiary border border-borderDefault rounded px-3 py-2.5 text-textPrimary focus:border-accentPrimary focus:outline-none min-h-[44px]"
-                        />
-                        <span className="text-[11px] text-textTertiary mt-1 block">
-                          Rule limit: {maxPosition}% (₹{Math.round(practiceCapital * (maxPosition / 100)).toLocaleString()})
-                        </span>
+                        {!selectedReasonCode && (
+                          <span className="text-[11px] text-textTertiary">Select one chip</span>
+                        )}
                       </div>
 
-                      <div>
-                        <label className="block text-xs uppercase tracking-wider text-textSecondary mb-1 font-semibold">
-                          3. Reason for Decision
-                        </label>
-                        <select
-                          value={decisionReason}
-                          onChange={(e) => setDecisionReason(e.target.value)}
-                          className="w-full bg-bgTertiary border border-borderDefault rounded px-3 py-2.5 text-textPrimary focus:border-accentPrimary focus:outline-none min-h-[44px]"
-                        >
-                          <option value="Followed my rule">Followed my rule</option>
-                          <option value="Fear">Fear</option>
-                          <option value="FOMO">FOMO</option>
-                          <option value="Wanted to recover loss">Wanted to recover loss</option>
-                          <option value="Social media tip">Social media tip</option>
-                          <option value="Did analysis">Did analysis</option>
-                          <option value="Not sure">Not sure</option>
-                        </select>
-                      </div>
+                      {reasonsLoading && !(reasonsByAction[selectedAction]?.length) ? (
+                        <div className="text-xs text-textTertiary py-3">Loading reasons for {selectedAction}...</div>
+                      ) : (
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                          {(reasonsByAction[selectedAction] || []).slice(0, 8).map((r) => {
+                            const isSelected = selectedReasonCode === r.code;
+                            return (
+                              <button
+                                key={r.code}
+                                type="button"
+                                aria-pressed={isSelected}
+                                onClick={() => {
+                                  setSelectedReasonCode(r.code);
+                                  setDecisionError('');
+                                }}
+                                className={`min-h-[44px] px-3 py-2.5 rounded-lg text-left text-xs sm:text-sm font-medium transition-all flex items-center justify-between gap-2 border ${
+                                  isSelected
+                                    ? 'bg-accentPrimary/20 border-accentPrimary text-textPrimary ring-2 ring-accentPrimary/40 shadow-sm'
+                                    : 'bg-bgTertiary border-borderDefault text-textSecondary hover:text-textPrimary hover:border-borderStrong'
+                                }`}
+                              >
+                                <span>{r.label}</span>
+                                <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-bgSecondary text-textTertiary border border-borderDefault shrink-0">
+                                  {r.kind}
+                                </span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
                     </div>
+
+                    {decisionError && (
+                      <div className="p-3 rounded bg-warningBg/40 border border-warning text-warning text-xs flex items-center justify-between">
+                        <span>{decisionError}</span>
+                        <button type="button" onClick={() => setDecisionError('')} className="font-bold ml-2">✕</button>
+                      </div>
+                    )}
 
                     {/* Optional Note */}
                     <div>

@@ -18,21 +18,21 @@ import {
   CheckCircle2,
   Info,
   ArrowUp,
-  ArrowDown,
-  Sparkles,
+  Layers,
+  Target,
 } from 'lucide-react';
 
 /**
  * TradeZen Trading Discipline Dashboard.
- * 
+ *
  * Features:
  * - Mistakes by type over time (Recharts BarChart & Timeline)
  * - Repeated-mistake list (highlighting habits formed)
  * - Improvement meter (Attempt 1 vs changed answers)
  * - Rule-keeping meter (% compliance)
  * - Discipline score trend (LineChart)
- * - Enforces color guidelines: gain/loss strictly for money, warning for mistakes,
- *   info for tips, success for improvement.
+ * - Reason-kind breakdown with empty state & minimum sample size
+ * - Reason versus outcome with empty state & minimum sample size
  * - Always shows how many decisions back each claim.
  * - Shows 'not enough data yet' when decisions < 10.
  */
@@ -45,7 +45,7 @@ export default function Dashboard({ data, onRestartSeason, onStartPracticing }) 
         </div>
         <h3 className="text-lg font-bold text-textPrimary">No Decisions Recorded Yet</h3>
         <p className="text-sm text-textSecondary max-w-md mx-auto">
-          Play your first practice scenarios to start analyzing your behavioral tendencies, mistake patterns, and rule adherence.
+          Play your first practice scenarios to start analyzing your behavioral tendencies, reason patterns, and rule adherence.
         </p>
         <button
           type="button"
@@ -66,20 +66,36 @@ export default function Dashboard({ data, onRestartSeason, onStartPracticing }) 
     has_enough_data = false,
     decisions_backing_claim = 0,
     rule_compliance_pct = 0,
-    discipline_score = 0,
     mistakes_by_type = {},
     repeated_mistakes = [],
     improvement = {},
     discipline_trend = [],
+    reason_kind_breakdown = null,
+    reason_vs_outcome = null,
   } = data;
 
-  // Chart data for mistakes by type
   const mistakeChartData = [
     { name: 'Panic Sell', count: mistakes_by_type.panic_sell || 0 },
     { name: 'Averaging Down', count: mistakes_by_type.averaging_down || 0 },
     { name: 'FOMO Buy', count: mistakes_by_type.fomo_buy || 0 },
     { name: 'Revenge Trade', count: mistakes_by_type.revenge_trade || 0 },
   ];
+
+  const kindItems = reason_kind_breakdown?.items || [];
+  const kindHasAnyCount = kindItems.some((item) => item.count > 0);
+  const kindMinSample = reason_kind_breakdown?.min_sample_size || 5;
+  const kindHasEnough = Boolean(reason_kind_breakdown?.has_enough_data);
+
+  const outcomeItems = reason_vs_outcome?.items || [];
+  const outcomeMinSample = reason_vs_outcome?.min_sample_size || 3;
+  const outcomeHasEnough = Boolean(reason_vs_outcome?.has_enough_data);
+
+  const kindBadgeClass = (kind) => {
+    if (kind === 'plan') return 'bg-successBg text-success border border-success/30';
+    if (kind === 'emotion') return 'bg-warningBg text-warning border border-warning/30';
+    if (kind === 'mixed') return 'bg-infoBg text-info border border-info/30';
+    return 'bg-bgTertiary text-textSecondary border border-borderDefault';
+  };
 
   return (
     <div className="space-y-6">
@@ -124,14 +140,12 @@ export default function Dashboard({ data, onRestartSeason, onStartPracticing }) 
 
       {/* Primary KPI Row */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
-        {/* KPI 1: Rule-Keeping Meter */}
         <div className="bg-bgSecondary border border-borderDefault p-4 rounded-lg space-y-1">
           <span className="text-xs text-textTertiary uppercase font-semibold">Rule-Keeping Meter</span>
           <div className="flex items-baseline space-x-2">
             <span className="text-2xl font-extrabold text-textPrimary">{rule_compliance_pct}%</span>
             <span className="text-xs text-textSecondary">kept</span>
           </div>
-          {/* Visual progress bar */}
           <div className="w-full bg-bgTertiary h-2 rounded-full overflow-hidden mt-2">
             <div
               className={`h-full rounded-full transition-all duration-500 ${
@@ -145,7 +159,6 @@ export default function Dashboard({ data, onRestartSeason, onStartPracticing }) 
           </span>
         </div>
 
-        {/* KPI 2: Improvement from Feedback */}
         <div className="bg-bgSecondary border border-borderDefault p-4 rounded-lg space-y-1">
           <span className="text-xs text-textTertiary uppercase font-semibold">Improvement (Revision)</span>
           <div className="flex items-baseline space-x-1 text-success">
@@ -160,7 +173,6 @@ export default function Dashboard({ data, onRestartSeason, onStartPracticing }) 
           </span>
         </div>
 
-        {/* KPI 3: Blind First Tries */}
         <div className="bg-bgSecondary border border-borderDefault p-4 rounded-lg space-y-1">
           <span className="text-xs text-textTertiary uppercase font-semibold">Blind First Attempts</span>
           <div className="text-2xl font-extrabold text-accentPrimary">{first_attempts}</div>
@@ -170,7 +182,6 @@ export default function Dashboard({ data, onRestartSeason, onStartPracticing }) 
           </span>
         </div>
 
-        {/* KPI 4: Total Decisions */}
         <div className="bg-bgSecondary border border-borderDefault p-4 rounded-lg space-y-1">
           <span className="text-xs text-textTertiary uppercase font-semibold">Total Decisions</span>
           <div className="text-2xl font-extrabold text-textPrimary">{total_decisions}</div>
@@ -185,7 +196,6 @@ export default function Dashboard({ data, onRestartSeason, onStartPracticing }) 
 
       {/* Middle Row: Trend & Mistakes by Type */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        {/* Discipline Score Trend Line Chart */}
         <div className="bg-bgSecondary border border-borderDefault p-4 sm:p-5 rounded-lg space-y-3">
           <div className="flex items-center justify-between">
             <div>
@@ -229,7 +239,6 @@ export default function Dashboard({ data, onRestartSeason, onStartPracticing }) 
           </div>
         </div>
 
-        {/* Mistakes by Type Bar Chart */}
         <div className="bg-bgSecondary border border-borderDefault p-4 sm:p-5 rounded-lg space-y-3">
           <div className="flex items-center justify-between">
             <div>
@@ -257,6 +266,150 @@ export default function Dashboard({ data, onRestartSeason, onStartPracticing }) 
               </BarChart>
             </ResponsiveContainer>
           </div>
+        </div>
+      </div>
+
+      {/* Reason-Kind Breakdown & Reason vs. Outcome */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        {/* Reason-Kind Breakdown */}
+        <div className="bg-bgSecondary border border-borderDefault p-4 sm:p-5 rounded-lg space-y-3">
+          <div className="flex items-center justify-between border-b border-borderDefault pb-2.5">
+            <div className="flex items-center space-x-2">
+              <Layers className="w-4 h-4 text-accentPrimary" />
+              <div>
+                <h3 className="text-sm font-bold text-textPrimary">Reason-Kind Breakdown</h3>
+                <span className="text-[11px] text-textTertiary">
+                  Minimum sample size: {kindMinSample} decisions
+                </span>
+              </div>
+            </div>
+            <span className="text-xs font-mono bg-bgTertiary px-2 py-0.5 rounded border border-borderDefault text-textSecondary">
+              {total_decisions} decision{total_decisions === 1 ? '' : 's'}
+            </span>
+          </div>
+
+          {!kindHasAnyCount ? (
+            <div className="p-6 rounded bg-bgTertiary text-center text-xs text-textSecondary">
+              No reason data recorded yet in Season {season}.
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {!kindHasEnough && (
+                <div className="p-2.5 rounded bg-infoBg/20 border border-info/30 text-xs text-textSecondary flex items-center space-x-2">
+                  <Info className="w-4 h-4 text-info shrink-0" />
+                  <span>
+                    Not enough data yet ({total_decisions}/{kindMinSample} decisions) for a reliable breakdown.
+                  </span>
+                </div>
+              )}
+
+              <div className="space-y-2.5">
+                {kindItems.map((item) => (
+                  <div key={item.kind} className="space-y-1">
+                    <div className="flex items-center justify-between text-xs">
+                      <span className={`px-2 py-0.5 rounded text-[11px] font-semibold ${kindBadgeClass(item.kind)}`}>
+                        {item.label}
+                      </span>
+                      <span className="font-mono text-textSecondary">
+                        {item.count} ({item.pct}%)
+                      </span>
+                    </div>
+                    <div className="w-full bg-bgTertiary h-2 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-accentPrimary rounded-full transition-all duration-300"
+                        style={{ width: `${Math.min(100, item.pct)}%` }}
+                      />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Reason vs Outcome */}
+        <div className="bg-bgSecondary border border-borderDefault p-4 sm:p-5 rounded-lg space-y-3">
+          <div className="flex items-center justify-between border-b border-borderDefault pb-2.5">
+            <div className="flex items-center space-x-2">
+              <Target className="w-4 h-4 text-accentPrimary" />
+              <div>
+                <h3 className="text-sm font-bold text-textPrimary">Reason vs. Outcome</h3>
+                <span className="text-[11px] text-textTertiary">
+                  Minimum sample size: {outcomeMinSample} decisions per reason
+                </span>
+              </div>
+            </div>
+            <span className="text-xs font-mono bg-bgTertiary px-2 py-0.5 rounded border border-borderDefault text-textSecondary">
+              {outcomeItems.length} reason{outcomeItems.length === 1 ? '' : 's'}
+            </span>
+          </div>
+
+          {outcomeItems.length === 0 ? (
+            <div className="p-6 rounded bg-bgTertiary text-center text-xs text-textSecondary">
+              No reason-outcome pairs recorded yet in Season {season}.
+            </div>
+          ) : (
+            <div className="space-y-2.5 max-h-72 overflow-y-auto pr-1">
+              {!outcomeHasEnough && (
+                <div className="p-2.5 rounded bg-infoBg/20 border border-info/30 text-xs text-textSecondary flex items-center space-x-2">
+                  <Info className="w-4 h-4 text-info shrink-0" />
+                  <span>
+                    Not enough data yet: reach at least {outcomeMinSample} decisions with the same reason to unlock outcome averages.
+                  </span>
+                </div>
+              )}
+
+              {outcomeItems.map((item) => (
+                <div
+                  key={`${item.reason_code}_${item.action}`}
+                  className="p-3 rounded-lg bg-bgTertiary border border-borderDefault flex flex-wrap items-center justify-between gap-2 text-xs"
+                >
+                  <div className="space-y-1">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="uppercase font-mono text-[10px] px-1.5 py-0.5 rounded bg-bgSecondary border border-borderDefault text-textPrimary font-bold">
+                        {item.action}
+                      </span>
+                      <span className="font-semibold text-textPrimary">{item.reason_label}</span>
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded font-semibold ${kindBadgeClass(item.reason_kind)}`}>
+                        {item.reason_kind}
+                      </span>
+                    </div>
+                    <span className="text-[11px] text-textTertiary block">
+                      Based on {item.count} decision{item.count === 1 ? '' : 's'}
+                    </span>
+                  </div>
+
+                  {item.meets_min_sample ? (
+                    <div className="text-right space-y-0.5">
+                      <div className="font-mono font-bold text-textPrimary">
+                        {item.disciplined_pct}% disciplined
+                      </div>
+                      {item.avg_action_outcome_10m !== null && item.avg_action_outcome_10m !== undefined ? (
+                        <div
+                          className={`font-mono text-[11px] font-semibold ${
+                            item.avg_action_outcome_10m > 0
+                              ? 'text-gain'
+                              : item.avg_action_outcome_10m < 0
+                                ? 'text-loss'
+                                : 'text-textSecondary'
+                          }`}
+                        >
+                          10m edge: {item.avg_action_outcome_10m >= 0 ? '+' : ''}
+                          {item.avg_action_outcome_10m}%
+                        </div>
+                      ) : (
+                        <div className="text-[11px] text-textTertiary">Outcome pending</div>
+                      )}
+                    </div>
+                  ) : (
+                    <span className="text-[11px] text-textTertiary font-mono">
+                      Not enough data ({item.count}/{outcomeMinSample})
+                    </span>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       </div>
 

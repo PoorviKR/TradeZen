@@ -101,6 +101,7 @@ export const api = {
   getReveal: (scenarioId) => request(`/scenarios/${scenarioId}/reveal`),
 
   // Decisions & Coaching
+  getReasons: (action) => request(`/reasons?action=${encodeURIComponent(action)}`),
   submitDecision: (data) => request('/decisions', { method: 'POST', body: JSON.stringify(data) }),
   ratePrediction: (predictionId, feedbackCorrect) =>
     request(`/predictions/${predictionId}/feedback`, {
